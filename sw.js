@@ -1,6 +1,6 @@
 // Keeps the app usable without signal (sports halls often have none).
 // Pages: network first, falling back to the cached copy. Fonts: cache first.
-const CACHE = 'volapp-v2';
+const CACHE = 'volapp-v3';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {

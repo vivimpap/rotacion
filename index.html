@@ -760,7 +760,7 @@ function summaryScreen(id) {
   const detail = (k) => ui.open[k] ? `<div class="detail">${Object.entries(S.detail[k]).sort((a, b) => b[1] - a[1]).map(([l, n]) => `<span>${l}</span><b>${n}</b>`).join('')}</div>` : '';
   const causeRow = (k) => `<button class="row between" style="width:100%;min-height:40px" data-a="toggle" data-v="${k}"><span class="row"><i style="width:14px;height:14px;border-radius:5px;background:${CAUSE_COLOR[k]};display:block"></i><span style="font-weight:600">${CAUSE_LABEL[k]}</span></span><span class="row"><b class="num" style="font-size:18px">${c[k]}</b><span class="muted" style="font-size:12px">${ui.open[k] ? 'ocultar' : 'detalle'}</span></span></button>${detail(k)}`;
   const set = st.sets[ui.momSet] || st.sets[0];
-  const pids = Object.keys(S.players).filter((pid) => !P(pid).lib).sort((a, b) => S.players[b].pts - S.players[a].pts).slice(0, 5);
+  const pids = Object.keys(S.players).filter((pid) => !P(pid).lib && S.players[pid].pts > 0).sort((a, b) => S.players[b].pts - S.players[a].pts).slice(0, 5);
   const maxPts = Math.max(1, ...pids.map((pid) => S.players[pid].pts));
   const receivers = Object.keys(S.players).filter((pid) => S.players[pid].rec.n >= 3).sort((a, b) => recAvg(S.players[b]) - recAvg(S.players[a]));
   return `<div class="screen">
@@ -792,6 +792,7 @@ function summaryScreen(id) {
 
     <div class="card sage">
       <span class="eyebrow">Recepción</span>
+      ${S.receptions.length ? '' : '<div class="empty" style="border-color:rgba(42,41,37,.2);padding:18px 14px"><p class="muted" style="color:var(--ink-m)">No hay recepciones apuntadas. Cuando saca el rival, toca a la jugadora que recibe → <b>Recepción</b> → la nota de 0 a 3.</p></div>'}
       <div class="recdots" role="img" aria-label="Cada punto es una recepción, de rojo (0) a verde (3)">${S.receptions.map((x) => `<i style="background:${REC_COLOR[x.q]}"></i>`).join('')}</div>
       <div class="row wrap" style="font-size:12px;gap:10px">${['0', '1', '2', '3'].map((q) => `<span class="row" style="gap:4px"><i style="width:10px;height:10px;border-radius:5px;display:block;background:${REC_COLOR[q]}"></i>${q}</span>`).join('')}</div>
       <div class="stack" style="gap:10px;margin-top:4px">${receivers.map((pid) => { const a = recAvg(S.players[pid]); return `<div class="stat"><span style="font-weight:600">#${P(pid).n} ${esc(first(pid))} <span class="muted" style="font-weight:500;font-size:12px">· ${S.players[pid].rec.n} rec.</span></span><span class="v">${a.toFixed(1)}</span><div class="bar"><i style="width:${(a / 3) * 100}%;background:${REC_COLOR[Math.round(a)]}"></i></div></div>`; }).join('')}</div>
@@ -799,7 +800,9 @@ function summaryScreen(id) {
 
     <div class="card cream">
       <span class="eyebrow">Quién puntúa</span>
-      ${pids.map((pid) => { const ps = S.players[pid]; return `<button class="stat" style="width:100%;text-align:left" data-a="go" data-v="player:${pid}"><span style="font-weight:600">#${P(pid).n} ${esc(first(pid))} <span class="muted" style="font-weight:500;font-size:12px">· ${ps.att.kill} at · ${ps.serve.ace} sq · ${ps.block} bl</span></span><span class="v">${ps.pts}</span><div class="bar"><i style="width:${(ps.pts / maxPts) * 100}%"></i></div></button>`; }).join('')}
+      ${!pids.length ? '<div class="empty" style="border-color:rgba(42,41,37,.2);padding:18px 14px"><p class="muted" style="color:var(--ink-m)">Ningún punto está asignado a una jugadora. Con <b>+1 Nosotras</b> el punto cuenta en el marcador pero no es de nadie. Para que salga aquí, toca a la jugadora → la acción → el resultado.</p></div>' : ''}
+      ${S.detail.ourWinner['Sin jugadora'] && pids.length ? `<p class="muted" style="font-size:13px">Más ${S.detail.ourWinner['Sin jugadora']} puntos nuestros apuntados sin jugadora.</p>` : ''}
+      ${pids.map((pid) => { const ps = S.players[pid]; return `<button class="stat" style="width:100%;text-align:left" data-a="go" data-v="player:${pid}"><span style="font-weight:600">#${P(pid).n} ${esc(first(pid))} <span class="muted" style="font-weight:500;font-size:12px">· ${ps.att.kill} ataque · ${ps.serve.ace} saque · ${ps.block} bloqueo</span></span><span class="v">${ps.pts}</span><div class="bar"><i style="width:${(ps.pts / maxPts) * 100}%"></i></div></button>`; }).join('')}
     </div>
     <button class="btn primary" data-a="share">${icon('share', 20)} Compartir resumen</button>
     <button class="link" data-a="sheet" data-v="discard">Borrar este partido</button>
