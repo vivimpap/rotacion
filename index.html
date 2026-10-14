@@ -355,21 +355,138 @@ const serveRate = (ps) => (ps.serve.n ? (ps.serve.n - ps.serve.err) / ps.serve.n
 const recAvg = (ps) => (ps.rec.n ? ps.rec.sum / ps.rec.n : null);
 const attEff = (ps) => (ps.att.n ? (ps.att.kill - ps.att.err - ps.att.blk) / ps.att.n : null);
 
-// ---------- Sample data ------------------------------------------------------
-const KEY = 'volapp-v1';
-function newMatch(opponent, date, bestOf, lineup, liberoIds, firstServer) {
-  return { id: uid(), opponent, date, bestOf, status: 'live', events: [{ t: 'set_start', lineup, liberoIds, firstServer }] };
+// ---------- Store ------------------------------------------------------------
+// Every change is an operation appended to a log; the data is rebuilt from the
+// log. Inside Google Apps Script the log is shared through a spreadsheet, so
+// several phones can record at the same time. Elsewhere it stays on this phone.
+const SHARED = !!(window.google && google.script && google.script.run);
+const KEYS = SHARED ? { log: 'volapp-shared-log', ver: 'volapp-shared-ver', pending: 'volapp-shared-pending' } : { log: 'volapp-log', ver: 'volapp-log-ver', pending: 'volapp-pending' };
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* storage blocked */ } },
+};
+let log = store.get(KEYS.log, []);      // operations confirmed by the spreadsheet (or all of them, on a single phone)
+let ver = store.get(KEYS.ver, 0);       // how many spreadsheet rows this phone already has
+let pending = store.get(KEYS.pending, []); // recorded here, not yet sent
+let acked = [];                         // sent and confirmed, not yet pulled back
+let me = store.get('volapp-name', '');
+const sync = { state: SHARED ? 'connecting' : 'local', loaded: !SHARED || log.length > 0, inflight: null, timer: null };
+const newId = () => uid() + uid();
+
+function opsFromDb(db) {
+  const ops = [];
+  if (db.team) ops.push({ t: 'team', name: db.team });
+  for (const p of db.players || []) ops.push({ t: 'player', p: { id: p.id, name: p.name, n: p.n, pos: p.pos, lib: !!p.lib, active: p.active !== false } });
+  for (const m of db.matches || []) {
+    ops.push({ t: 'match', m: { id: m.id, opponent: m.opponent, date: m.date, bestOf: m.bestOf } });
+    for (const e of m.events || []) { const ev = { ...e, id: e.id || newId() }; ops.push({ t: 'ev_add', mid: m.id, eid: ev.id, ev }); }
+  }
+  return ops;
 }
-let DB = null;
-function load() { try { const raw = localStorage.getItem(KEY); return raw ? JSON.parse(raw) : null; } catch (e) { return null; } }
-function save() { try { localStorage.setItem(KEY, JSON.stringify(DB)); } catch (e) { /* storage blocked */ } }
-const P = (id) => DB.players.find((p) => p.id === id);
-const first = (id) => { const p = P(id); return p ? p.name.split(' ')[0] : '?'; };
+function reduceOps(ops) {
+  const db = { team: '', players: [], matches: [] }; const seen = new Set(); const players = new Map(); const matches = new Map();
+  for (const o of ops) {
+    if (o.cid) { if (seen.has(o.cid)) continue; seen.add(o.cid); }
+    if (o.t === 'team') db.team = o.name;
+    else if (o.t === 'player') players.set(o.p.id, { ...o.p });
+    else if (o.t === 'player_del') players.delete(o.id);
+    else if (o.t === 'match') { const old = matches.get(o.m.id); matches.set(o.m.id, { ...o.m, events: old ? old.events : [] }); }
+    else if (o.t === 'match_del') matches.delete(o.id);
+    else {
+      const m = matches.get(o.mid); if (!m) continue;
+      const i = m.events.findIndex((e) => e.id === o.eid);
+      if (o.t === 'ev_add' || o.t === 'ev_set') { if (i >= 0) m.events[i] = { ...o.ev }; else if (o.t === 'ev_add') m.events.push({ ...o.ev }); }
+      else if (o.t === 'ev_del' && i >= 0) m.events.splice(i, 1);
+    }
+  }
+  db.players = [...players.values()]; db.matches = [...matches.values()];
+  return db;
+}
+let DB = { team: '', players: [], matches: [] };
+function rebuild() {
+  DB = reduceOps(log.concat(acked, pending));
+  for (const m of DB.matches) m.status = m.events.length && replay(m).finished ? 'finished' : 'live';
+}
+// Data saved by the first single-phone version.
+if (!SHARED && !log.length) { const old = store.get('volapp-v1', null); if (old && old.team) { log = opsFromDb(old); store.set(KEYS.log, log); } }
+
+function commit(...ops) {
+  for (const o of ops) { o.cid = newId(); o.at = Date.now(); if (me) o.by = me; }
+  if (SHARED) { pending.push(...ops); store.set(KEYS.pending, pending); flush(); }
+  else { log.push(...ops); store.set(KEYS.log, log); }
+  rebuild();
+}
+function call(fn, ...args) {
+  return new Promise((resolve, reject) => google.script.run.withSuccessHandler(resolve).withFailureHandler(reject)[fn](...args));
+}
+function applyRemote(r) {
+  if (r.reset) { log = []; ver = 0; acked = []; store.set(KEYS.log, log); store.set(KEYS.ver, 0); return true; }
+  if (r.ops.length) {
+    log.push(...r.ops); ver = r.ver; store.set(KEYS.log, log); store.set(KEYS.ver, ver);
+    const have = new Set(log.map((o) => o.cid)); acked = acked.filter((o) => !have.has(o.cid));
+  }
+  return r.ops.length > 0;
+}
+function flush() {
+  if (!SHARED) return Promise.resolve();
+  if (sync.inflight) return sync.inflight;
+  sync.inflight = (async () => {
+    let changed = false; const wasLoaded = sync.loaded;
+    try {
+      for (let guard = 0; guard < 100; guard++) {
+        const batch = pending.slice(0, 200);
+        if (batch.length) setSync('saving');
+        const r = batch.length ? await call('push', batch, ver) : await call('pull', ver);
+        if (batch.length) {
+          const sent = new Set(batch.map((o) => o.cid));
+          acked.push(...batch); pending = pending.filter((o) => !sent.has(o.cid)); store.set(KEYS.pending, pending);
+        }
+        changed = applyRemote(r) || changed;
+        if (!r.more && !r.reset && !pending.length) break;
+      }
+      sync.loaded = true; setSync('ok');
+    } catch (e) { setSync('offline'); }
+    sync.inflight = null;
+    if (changed || !wasLoaded) { rebuild(); render(); }
+  })();
+  return sync.inflight;
+}
+function schedule() {
+  clearTimeout(sync.timer); if (!SHARED) return;
+  const ms = document.visibilityState !== 'visible' ? 30000 : route.name === 'live' ? 3000 : 6000;
+  sync.timer = setTimeout(() => { sync.timer = null; flush().finally(schedule); }, ms);
+}
+function syncLabel() {
+  const n = pending.length;
+  if (sync.state === 'offline') return [`Sin conexión${n ? ` · ${n} sin enviar` : ''}`, 'var(--red-s)'];
+  if (sync.state === 'connecting') return ['Conectando…', 'var(--ochre)'];
+  if (n || sync.state === 'saving') return ['Guardando…', 'var(--ochre)'];
+  return ['Al día', 'var(--green-s)'];
+}
+function syncBadge() {
+  if (!SHARED) return '';
+  const [txt, col] = syncLabel();
+  return `<span class="chip quiet" data-sync="badge" style="gap:6px"><i style="width:8px;height:8px;border-radius:4px;background:${col};display:block"></i>${txt}</span>`;
+}
+function syncDot() {
+  if (!SHARED) return '';
+  const [txt, col] = syncLabel();
+  return `<i data-sync="dot" title="${txt}" aria-label="${txt}" style="width:9px;height:9px;border-radius:5px;background:${col};display:inline-block;margin-right:6px"></i>`;
+}
+function setSync(state) {
+  sync.state = state;
+  document.querySelectorAll('[data-sync]').forEach((el) => { el.outerHTML = el.dataset.sync === 'dot' ? syncDot() : syncBadge(); });
+}
+
+function newMatch(opponent, date, bestOf, lineup, liberoIds, firstServer) {
+  return { id: newId(), opponent, date, bestOf, events: [{ id: newId(), t: 'set_start', lineup, liberoIds, firstServer }] };
+}
+const P = (id) => DB.players.find((p) => p.id === id) || { id, name: '?', n: '?', pos: 'receptora', lib: false, active: false };
+const first = (id) => P(id).name.split(' ')[0];
 const finished = () => DB.matches.filter((m) => m.status === 'finished').sort((a, b) => a.date.localeCompare(b.date));
 const liveMatch = () => DB.matches.find((m) => m.status === 'live');
 const matchById = (id) => DB.matches.find((m) => m.id === id);
 const cur = () => (route.id && matchById(route.id)) || liveMatch();
-DB = load() || { team: '', players: [], matches: [] };
 const roster = () => DB.players.filter((p) => p.active !== false);
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -423,7 +540,7 @@ function homeScreen() {
       <div class="row" style="gap:14px"><span class="num" style="font-size:44px;font-weight:700;letter-spacing:-1.5px">${s.us}–${s.them}</span><span class="muted">Sets ${st.setsUs}–${st.setsThem}</span></div></button>`;
   }
   return `<div class="screen">
-    <div><div class="eyebrow">${esc(DB.team)}</div><h1>Partidos</h1></div>
+    <div><div class="row between"><span class="eyebrow">${esc(DB.team)}</span>${syncBadge()}</div><h1>Partidos</h1></div>
     ${liveCard}
     ${live ? '' : `<button class="btn primary" data-a="newMatch">${icon('plus')} Nuevo partido</button>`}
     ${roster().filter((p) => !p.lib).length < 6 ? '<p class="muted" style="text-align:center;font-size:14px">Para empezar un partido, añade antes tu plantilla en Equipo.</p>' : ''}
@@ -432,9 +549,18 @@ function homeScreen() {
       <span class="chip ${r.won ? 'win' : 'loss'}">${r.won ? 'G' : 'P'} ${r.st.setsUs}–${r.st.setsThem}</span>
       <span class="grow"><span class="name" style="display:block">vs. ${esc(m.opponent)}</span><span class="sub">${fmtDate(m.date)} · ${r.sets}</span></span>${icon('back', 18).replace('m14 6-6 6 6 6', 'm10 6 6 6-6 6')}</button>`; }).join('')
       : '<div class="empty"><h3>Aún no hay partidos</h3><p class="muted">Cuando termines uno, aparecerá aquí con su resumen.</p></div>'}</div>
+    ${SHARED ? `<button class="link" data-a="editName">${me ? `Apuntas como ${esc(me)} · cambiar` : 'Pon tu nombre'}</button>` : ''}
     <button class="link" data-a="sheet" data-v="backup">Copia de seguridad</button>
 
   </div>${tabbar()}`;
+}
+
+function connectingScreen() {
+  const off = sync.state === 'offline';
+  return `<div class="screen" style="justify-content:center;align-items:center;text-align:center;gap:14px">
+    <h2>${off ? 'Sin conexión' : 'Conectando con el equipo…'}</h2>
+    <p class="muted">${off ? 'La primera vez hace falta internet para descargar los datos del equipo.' : 'Un momento.'}</p>
+    ${off ? '<button class="btn primary" data-a="retry">Reintentar</button>' : ''}</div>`;
 }
 
 function welcomeScreen() {
@@ -541,7 +667,7 @@ function newMatchScreen() {
 }
 
 function zonesHtml(lineup, serveUs, target) {
-  const zone = (i, z) => { const id = lineup[i]; const p = id && P(id); return `<button class="zbtn ${p ? '' : 'emptyz'}" data-a="wizZone" data-v="${target}:${i}">
+  const zone = (i, z) => { const id = lineup[i]; const p = id ? P(id) : null; return `<button class="zbtn ${p ? '' : 'emptyz'}" data-a="wizZone" data-v="${target}:${i}">
     <span style="position:absolute;top:6px;left:9px;font-size:11px;font-weight:700;color:var(--ink-m)">Z${z}</span>${z === 1 && serveUs ? `<span style="position:absolute;top:5px;right:6px">${ballSvg()}</span>` : ''}
     ${p ? `<span class="num" style="font-size:26px;font-weight:700">${p.n}</span><span style="font-size:13px;font-weight:600">${esc(first(id))}</span>` : `<span style="font-size:13px;font-weight:600;color:var(--ink-m)">Elegir</span>`}</button>`; };
   return `<div class="zones"><div class="net" style="grid-column:1/-1"></div>${zone(3, 4)}${zone(2, 3)}${zone(1, 2)}${zone(4, 5)}${zone(5, 6)}${zone(0, 1)}</div>`;
@@ -556,7 +682,7 @@ function liveScreen() {
   const server = st.serving === 'us' ? `Saca ${esc(first(ct[0]))} (#${P(ct[0]).n})` : `Saca ${esc(m.opponent)} · recibimos`;
   const scoreboard = `<div class="scoreboard">
     <div class="row between"><button class="back" style="width:36px;height:36px" data-a="leaveLive" aria-label="Salir">${icon('back', 18)}</button>
-      <span class="eyebrow" style="color:var(--tx)">Set ${st.setNo} · Sets ${st.setsUs}–${st.setsThem}</span><span class="setdots" aria-hidden="true">${setDots}</span></div>
+      <span class="eyebrow" style="color:var(--tx)">${syncDot()}Set ${st.setNo} · Sets ${st.setsUs}–${st.setsThem}</span><span class="setdots" aria-hidden="true">${setDots}</span></div>
     <div class="scores">
       <div class="side ${st.serving === 'us' ? 'serving' : ''}"><span class="tname">${st.serving === 'us' ? '<span class="servedot"></span>' : ''}${esc(DB.team)}</span><span class="pts ${bumpUs ? 'bump' : ''}">${set.us}</span></div>
       <span class="dash">–</span>
@@ -625,7 +751,7 @@ function rallyStarted(m, st) {
 }
 
 function summaryScreen(id) {
-  const m = matchById(id); const r = resultLine(m); const st = r.st; const S = statsOf([m]); const c = S.causes;
+  const m = matchById(id); if (!m) { route = { name: 'home' }; return homeScreen(); } const r = resultLine(m); const st = r.st; const S = statsOf([m]); const c = S.causes;
   const ourTot = c.ourWinner + c.theirError, theirTot = c.theirWinner + c.ourError;
   const gifts = c.theirError / (ourTot || 1);
   const insight = c.ourError > c.theirError
@@ -727,11 +853,11 @@ function sheetHtml() {
   if (s.kind === 'history') {
     const entries = st.log.filter((e) => !e.ignored).slice().reverse();
     inner = `<h3>Historial</h3><p class="muted" style="font-size:13px">Toca una acción para cambiar su resultado, o bórrala.</p><div class="list">${entries.map((e) => `<div class="item" style="min-height:56px;padding:8px 10px 8px 14px">
-      <span class="grow"><span class="name" style="display:block;font-size:15px">${esc(describe(e.ev, m))}</span><span class="sub">Set ${e.set} · ${e.score[0]}–${e.score[1]}${e.note ? ' · ' + esc(e.note) : ''}</span></span>
-      ${e.ev.t === 'action' && OUTS[e.ev.skill].length > 1 ? `<button class="back" style="width:40px;height:40px;background:var(--bg)" data-a="editEv" data-v="${e.i}" aria-label="Editar">${icon('edit', 18)}</button>` : ''}
-      ${e.i > 0 ? `<button class="back" style="width:40px;height:40px;background:var(--bg)" data-a="delEv" data-v="${e.i}" aria-label="Borrar">${icon('trash', 18)}</button>` : ''}</div>`).join('')}</div>`;
+      <span class="grow"><span class="name" style="display:block;font-size:15px">${esc(describe(e.ev, m))}</span><span class="sub">Set ${e.set} · ${e.score[0]}–${e.score[1]}${e.ev.by ? ' · ' + esc(e.ev.by) : ''}${e.note ? ' · ' + esc(e.note) : ''}</span></span>
+      ${e.ev.t === 'action' && OUTS[e.ev.skill].length > 1 ? `<button class="back" style="width:40px;height:40px;background:var(--bg)" data-a="editEv" data-v="${e.ev.id}" aria-label="Editar">${icon('edit', 18)}</button>` : ''}
+      ${e.i > 0 ? `<button class="back" style="width:40px;height:40px;background:var(--bg)" data-a="delEv" data-v="${e.ev.id}" aria-label="Borrar">${icon('trash', 18)}</button>` : ''}</div>`).join('')}</div>`;
   } else if (s.kind === 'edit') {
-    const ev = m.events[s.i];
+    const ev = m.events.find((e) => e.id === s.id) || m.events[0];
     inner = `<h3>${esc(describe(ev, m))}</h3><p class="muted">Elige el resultado correcto. El marcador se recalcula.</p><div class="grid2">${OUTS[ev.skill].map(([v, l, cls]) => `<button class="act ${cls}" data-a="setOut" data-v="${v}">${l}</button>`).join('')}</div>`;
   } else if (s.kind === 'sub') {
     if (!s.out) {
@@ -775,6 +901,10 @@ function sheetHtml() {
       ${f.out ? `<div class="field"><label for="exp">Copia (selecciónala y cópiala)</label><textarea id="exp" class="input" readonly>${esc(f.out)}</textarea></div>` : ''}
       <div class="field"><label for="imp">Restaurar una copia</label><textarea id="imp" class="input" data-form="imp" placeholder="Pega aquí el texto de una copia">${esc(f.imp || '')}</textarea></div>
       ${f.err ? `<p class="err">${f.err}</p>` : ''}<button class="btn secondary wide" data-a="importData">Restaurar</button>`;
+  } else if (s.kind === 'whoami') {
+    inner = `<h3>¿Cómo te llamas?</h3><p class="muted">Así se verá quién apunta cada jugada. Se guarda solo en este móvil.</p>
+      <div class="field"><label for="mename">Tu nombre</label><input id="mename" class="input" data-form="me" value="${esc((ui.form && ui.form.me) || '')}" placeholder="p. ej. Vic" autocomplete="off"></div>
+      <button class="btn primary" data-a="saveName">Guardar</button>`;
   } else if (s.kind === 'nextSet') {
     const n = ui.nextSet;
     inner = `<h3>Set ${replay(cur()).setNo + 1}</h3><p class="muted">Toca una zona para cambiar quién empieza ahí.</p>${zonesHtml(n.lineup, n.first === 'us', 'next')}
@@ -798,10 +928,10 @@ function describe(ev, m) {
 function record(ev, msg) {
   const m = cur(); if (!m) return;
   const before = replay(m);
-  m.events.push(ev);
-  const after = replay(m);
-  m.status = after.finished ? 'finished' : 'live';
-  save(); ui.sel = null;
+  ev.id = newId(); if (me) ev.by = me;
+  commit({ t: 'ev_add', mid: m.id, eid: ev.id, ev });
+  const after = replay(matchById(m.id));
+  ui.sel = null;
   const scored = after.points.length > before.points.length;
   vibrate(scored ? 22 : 10);
   if (after.finished) { vibrate([30, 60, 30]); toast('Partido terminado'); }
@@ -842,7 +972,8 @@ const H = {
   wizFirst: (v) => { ui.wiz.first = v; render(); },
   wizStart: () => {
     const w = ui.wiz; const m = newMatch(w.opponent.trim(), w.date, w.bestOf, [...w.lineup], w.libero ? [w.libero] : [], w.first);
-    DB.matches.push(m); save(); stack.length = 0; route = { name: 'home' }; vibrate(20); go({ name: 'live', id: m.id });
+    commit({ t: 'match', m: { id: m.id, opponent: m.opponent, date: m.date, bestOf: m.bestOf } }, { t: 'ev_add', mid: m.id, eid: m.events[0].id, ev: m.events[0] });
+    stack.length = 0; route = { name: 'home' }; vibrate(20); go({ name: 'live', id: m.id });
   },
   selPlayer: (v) => { ui.sel = ui.sel && ui.sel.pid === v ? null : { pid: v }; vibrate(6); render(); },
   selSkill: (v) => {
@@ -861,7 +992,7 @@ const H = {
   cancelSel: () => { ui.sel = null; render(); },
   undo: () => {
     const m = cur(); if (!m || m.events.length <= 1) return;
-    const ev = m.events.pop(); m.status = replay(m).finished ? 'finished' : 'live'; save(); ui.sel = null; vibrate(8); toast(`Deshecho: ${describe(ev, m)}`); render();
+    const ev = m.events[m.events.length - 1]; commit({ t: 'ev_del', mid: m.id, eid: ev.id }); ui.sel = null; vibrate(8); toast(`Deshecho: ${describe(ev, m)}`); render();
   },
   startSet: () => {
     const m = cur(); const st = replay(m); const ev = nextSetStart(m, st);
@@ -869,23 +1000,22 @@ const H = {
       if (ui.nextSet.lineup.some((x) => !x)) { toast('Faltan zonas por completar'); return; }
       ev.lineup = [...ui.nextSet.lineup]; ev.firstServer = ui.nextSet.first;
     }
-    ui.sheet = null; m.events.push(ev); m.status = 'live'; save(); vibrate(20); toast(`Empieza el set ${st.setNo + 1}`); render();
+    ev.id = newId(); if (me) ev.by = me; ui.sheet = null; commit({ t: 'ev_add', mid: m.id, eid: ev.id, ev }); vibrate(20); toast(`Empieza el set ${st.setNo + 1}`); render();
   },
   nextSetEdit: () => { const m = cur(); const nx = nextSetStart(m, replay(m)); ui.nextSet = { lineup: [...nx.lineup], first: nx.firstServer }; ui.sheet = { kind: 'nextSet' }; render(); },
   nextFirst: (v) => { ui.nextSet.first = v; render(); },
   editTeam: () => { ui.form = { team: DB.team, err: '' }; ui.sheet = { kind: 'team' }; render(); },
   saveTeam: () => {
     const t = ((ui.form && ui.form.team) || '').trim(); if (!t) { ui.form = { ...ui.form, err: 'Escribe un nombre.' }; return render(); }
-    const isNew = !DB.team; DB.team = t; save(); ui.sheet = null; ui.form = null;
+    const isNew = !DB.team; commit({ t: 'team', name: t }); ui.sheet = null; ui.form = null;
     if (isNew) { route = { name: 'team' }; stack.length = 0; toast('Ahora añade a tus jugadoras'); return render(true); }
     toast('Nombre guardado'); render();
   },
-  discardMatch: () => { const m = cur(); DB.matches = DB.matches.filter((x) => x !== m); save(); ui.sheet = null; ui.sel = null; stack.length = 0; route = { name: 'home' }; toast('Partido borrado'); render(true); },
+  discardMatch: () => { const m = cur(); commit({ t: 'match_del', id: m.id }); ui.sheet = null; ui.sel = null; stack.length = 0; route = { name: 'home' }; toast('Partido borrado'); render(true); },
   editPlayer: (v) => { const p = P(v); ui.form = { id: v, name: p.name, n: String(p.n), pos: p.pos, err: '' }; ui.sheet = { kind: 'player' }; render(); },
   delPlayer: () => {
     const id = ui.form.id; const used = DB.matches.some((m) => JSON.stringify(m.events).includes(`"${id}"`));
-    if (used) P(id).active = false; else DB.players = DB.players.filter((p) => p.id !== id);
-    save(); ui.sheet = null; toast(used ? 'Quitada de la plantilla (sus datos se mantienen)' : 'Jugadora borrada'); render();
+    commit(used ? { t: 'player', p: { ...P(id), active: false } } : { t: 'player_del', id }); ui.sheet = null; toast(used ? 'Quitada de la plantilla (sus datos se mantienen)' : 'Jugadora borrada'); render();
   },
   exportData: async () => {
     const text = JSON.stringify(DB); ui.form = ui.form || {};
@@ -897,14 +1027,23 @@ const H = {
     try {
       const d = JSON.parse(((ui.form && ui.form.imp) || '').trim());
       if (!d || !Array.isArray(d.players) || !Array.isArray(d.matches)) throw new Error('bad');
-      DB = d; save(); ui.sheet = null; stack.length = 0; route = { name: 'home' }; toast('Copia restaurada'); render(true);
+      if (!SHARED) { log = []; store.set(KEYS.log, log); }
+      commit(...opsFromDb(d)); ui.sheet = null; stack.length = 0; route = { name: 'home' };
+      toast(SHARED ? 'Copia añadida a los datos del equipo' : 'Copia restaurada'); render(true);
     } catch (e) { ui.form.err = 'Ese texto no es una copia válida. Pégala entera, desde la primera llave hasta la última.'; render(); }
   },
   sheet: (v) => { if (v === 'backup') ui.form = {}; ui.sheet = { kind: v }; render(); },
   closeSheet: () => { ui.sheet = null; render(); },
-  delEv: (v) => { const m = cur(); m.events.splice(+v, 1); m.status = replay(m).finished ? 'finished' : 'live'; save(); toast('Acción borrada'); render(); },
-  editEv: (v) => { ui.sheet = { kind: 'edit', i: +v }; render(); },
-  setOut: (v) => { const m = cur(); const ev = m.events[ui.sheet.i]; ev.out = ev.skill === 'reception' ? +v : v; m.status = replay(m).finished ? 'finished' : 'live'; save(); ui.sheet = { kind: 'history' }; toast('Acción corregida'); render(); },
+  delEv: (v) => { const m = cur(); commit({ t: 'ev_del', mid: m.id, eid: v }); toast('Acción borrada'); render(); },
+  editEv: (v) => { ui.sheet = { kind: 'edit', id: v }; render(); },
+  setOut: (v) => {
+    const m = cur(); const old = m.events.find((e) => e.id === ui.sheet.id); if (!old) { ui.sheet = { kind: 'history' }; return render(); }
+    const ev = { ...old, out: old.skill === 'reception' ? +v : v };
+    commit({ t: 'ev_set', mid: m.id, eid: ev.id, ev }); ui.sheet = { kind: 'history' }; toast('Acción corregida'); render();
+  },
+  saveName: () => { me = ((ui.form && ui.form.me) || '').trim(); store.set('volapp-name', me); ui.sheet = null; ui.form = null; if (me) toast(`Hola, ${me}`); render(); },
+  editName: () => { ui.form = { me }; ui.sheet = { kind: 'whoami' }; render(); },
+  retry: () => { setSync('connecting'); render(); flush(); },
   subOut: (v) => { const st = replay(cur()); if (st.subs >= 6) { toast('Ya no quedan cambios en este set'); return; } ui.sheet = { kind: 'sub', out: v }; render(); },
   subIn: (v) => { const out = ui.sheet.out; ui.sheet = null; record({ t: 'sub', out, in: v }, `Entra ${first(v)} por ${first(out)}`); },
   timeout: (v) => { ui.sheet = null; record({ t: 'timeout', side: v }, `Tiempo muerto ${v === 'us' ? 'nuestro' : 'del rival'}`); },
@@ -923,9 +1062,8 @@ const H = {
     else if (!(n >= 0 && n <= 99)) f.err = 'El dorsal tiene que ser un número entre 0 y 99.';
     else if (roster().some((p) => p.n === n && p.id !== f.id)) f.err = `El dorsal ${n} ya lo lleva ${first(roster().find((p) => p.n === n).id)}.`;
     else {
-      if (f.id) Object.assign(P(f.id), { name: f.name.trim(), n, pos: f.pos, lib: f.pos === 'libero' });
-      else DB.players.push({ id: uid(), name: f.name.trim(), n, pos: f.pos, lib: f.pos === 'libero', active: true });
-      save(); ui.sheet = null; toast(`${f.name.trim().split(' ')[0]} ${f.id ? 'actualizada' : 'añadida'}`); return render();
+      commit({ t: 'player', p: { id: f.id || newId(), name: f.name.trim(), n, pos: f.pos, lib: f.pos === 'libero', active: true } });
+      ui.sheet = null; toast(`${f.name.trim().split(' ')[0]} ${f.id ? 'actualizada' : 'añadida'}`); return render();
     }
     render();
   },
@@ -936,7 +1074,8 @@ const app = document.getElementById('app');
 function render(scrollTop) {
   const focusId = document.activeElement && document.activeElement.id; const caret = document.activeElement && document.activeElement.selectionStart;
   let html = '';
-  if (!DB.team) html = welcomeScreen();
+  if (SHARED && !sync.loaded) html = connectingScreen();
+  else if (!DB.team) html = welcomeScreen();
   else if (route.name === 'home') html = homeScreen();
   else if (route.name === 'team') html = teamScreen();
   else if (route.name === 'season') html = seasonScreen();
@@ -949,6 +1088,8 @@ function render(scrollTop) {
   if (focusId) { const el = document.getElementById(focusId); if (el) { el.focus(); try { el.setSelectionRange(caret, caret); } catch (e) { /* date inputs */ } } }
   if (scrollTop) window.scrollTo(0, 0);
   keepAwake(route.name === 'live');
+  if (!sync.timer) schedule();
+  if (SHARED && sync.loaded && DB.team && !me && !ui.sheet && !ui.askedName) { ui.askedName = true; ui.form = { me: '' }; ui.sheet = { kind: 'whoami' }; render(); }
 }
 let wakeLock = null;
 async function keepAwake(on) {
@@ -957,7 +1098,11 @@ async function keepAwake(on) {
     else if (!on && wakeLock) { await wakeLock.release(); wakeLock = null; }
   } catch (e) { /* not available */ }
 }
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && route.name === 'live') keepAwake(true); });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') { if (route.name === 'live') keepAwake(true); flush(); }
+  schedule();
+});
+window.addEventListener('online', () => flush());
 document.addEventListener('click', (e) => {
   const el = e.target.closest('[data-a]'); if (!el) return;
   if (el.dataset.a === 'closeSheet' && e.target.closest('[data-stop]') && !e.target.closest('button[data-a="closeSheet"]')) return;
@@ -969,8 +1114,7 @@ document.addEventListener('input', (e) => {
   if (t.dataset.in && ui.wiz) ui.wiz[t.dataset.in] = t.value;
   if (t.dataset.form) { ui.form = ui.form || {}; ui.form[t.dataset.form] = t.value; }
 });
+rebuild();
 render();
-if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
+flush();
 </script>
-</body>
-</html>
