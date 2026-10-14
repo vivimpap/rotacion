@@ -7,12 +7,12 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Rotación">
+<meta name="apple-mobile-web-app-title" content="VolApp">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <style>html{box-sizing:border-box}:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0}</style>
-<title>Rotación</title>
+<title>VolApp</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -210,8 +210,6 @@ button.card:active { transform: scale(.985); }
 'use strict';
 // ---------- Utilities --------------------------------------------------------
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-function rng(seed) { let s = seed >>> 0; return () => { s = (s + 0x6D2B79F5) >>> 0; let t = s; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
-const pick = (r, a) => a[Math.floor(r() * a.length)];
 const uid = () => Math.random().toString(36).slice(2, 10);
 const MONTHS = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
 const fmtDate = (d) => { const [, m, dd] = d.split('-'); return `${+dd} ${MONTHS[+m - 1]}`; };
@@ -358,81 +356,9 @@ const recAvg = (ps) => (ps.rec.n ? ps.rec.sum / ps.rec.n : null);
 const attEff = (ps) => (ps.att.n ? (ps.att.kill - ps.att.err - ps.att.blk) / ps.att.n : null);
 
 // ---------- Sample data ------------------------------------------------------
-const KEY = 'rotacion-prototipo-v1';
-const SEED_PLAYERS = [
-  ['Lucía Ferrer', 1, 'colocadora'], ['Marta Sanz', 3, 'receptora'], ['Irene Molina', 4, 'central'], ['Paula Vidal', 7, 'opuesta'],
-  ['Nerea Gil', 8, 'receptora'], ['Carla Ortiz', 10, 'central'], ['Alba Romero', 5, 'libero'], ['Sara Pastor', 9, 'colocadora'],
-  ['Noa Herrera', 11, 'receptora'], ['Julia Navarro', 12, 'central'], ['Elena Cano', 14, 'opuesta'], ['Aitana Ruiz', 2, 'libero'],
-].map(([name, n, pos], i) => ({ id: 'p' + (i + 1), name, n, pos, lib: pos === 'libero' }));
-const DEFAULT_LINEUP = ['p1', 'p2', 'p3', 'p4', 'p5', 'p6'];
-
-function simulate(m, seed, p) {
-  const r = rng(seed); const push = (e) => m.events.push(e);
-  const A = (pid, skill, out) => push({ t: 'action', pid, skill, out });
-  for (let guard = 0; guard < 3000; guard++) {
-    const st = replay(m);
-    if (st.finished) break;
-    if (st.needSetStart) { push(nextSetStart(m, st)); continue; }
-    let ct = courtOf(st);
-    // The libero comes in for a back-row middle when we receive.
-    if (!st.libero && st.serving === 'them' && st.liberoIds.length) {
-      const idx = [0, 4, 5].find((k) => P(ct[k]) && P(ct[k]).pos === 'central');
-      if (idx !== undefined) { push({ t: 'libero', dir: 'in', lid: st.liberoIds[0], pid: ct[idx] }); ct = courtOf(replay(m)); }
-    }
-    if (r() < 0.012 && st.timeouts.us < 2) push({ t: 'timeout', side: 'us' });
-    const front = [ct[1], ct[2], ct[3]], back = [ct[0], ct[4], ct[5]];
-    let q = 2;
-    if (st.serving === 'us') {
-      const x = r();
-      if (x < p.ace) { A(ct[0], 'serve', 'ace'); continue; }
-      if (x < p.ace + p.serr) { A(ct[0], 'serve', 'error'); continue; }
-      A(ct[0], 'serve', 'in_play');
-      if (r() < 0.45) { // they side-out straight away or rally on
-        const y = r();
-        if (y < 0.55) { if (r() < 0.5) A(pick(r, back), 'defense', 'error'); else push({ t: 'point', cause: 'theirWinner' }); continue; }
-        if (y < 0.75) { push({ t: 'point', cause: 'theirError', kind: 'attack' }); continue; }
-        A(pick(r, back), 'defense', 'good');
-      }
-    } else {
-      if (r() < p.theirSerr) { push({ t: 'point', cause: 'theirError', kind: 'serve' }); continue; }
-      const receivers = back.filter((id) => ['receptora', 'libero'].includes(P(id).pos));
-      const x = r(); q = x < p.rec0 ? 0 : x < p.rec0 + 0.18 ? 1 : x < 0.6 ? 2 : 3;
-      A(pick(r, receivers.length ? receivers : back), 'reception', q);
-      if (q === 0) continue;
-    }
-    let done = false;
-    for (let k = 0; k < 6 && !done; k++) {
-      const att = pick(r, [front[0], front[1], front[2], front[2]]); const b = (q - 2) * 0.06; const x = r();
-      done = true;
-      if (x < p.kill + b) A(att, 'attack', 'kill');
-      else if (x < p.kill + b + p.aerr) A(att, 'attack', 'error');
-      else if (x < p.kill + b + p.aerr + p.blocked) A(att, 'attack', 'blocked');
-      else {
-        if (r() < 0.5) A(att, 'attack', 'in_play');
-        const y = r();
-        if (y < p.theirErr) push({ t: 'point', cause: 'theirError', kind: r() < 0.75 ? 'attack' : 'other' });
-        else if (y < p.theirErr + p.block) A(pick(r, front), 'block', 'point');
-        else if (y < p.theirErr + p.block + p.theirKill) { if (r() < 0.55) A(pick(r, back), 'defense', 'error'); else push({ t: 'point', cause: 'theirWinner' }); }
-        else if (y < p.theirErr + p.block + p.theirKill + p.unforced) A(pick(r, ct), 'error', 'unforced');
-        else { A(pick(r, back), 'defense', 'good'); q = 2; done = false; }
-      }
-    }
-    if (!done) push({ t: 'point', cause: r() < 0.5 ? 'ourWinner' : 'theirWinner' });
-  }
-  m.status = 'finished';
-  return m;
-}
+const KEY = 'volapp-v1';
 function newMatch(opponent, date, bestOf, lineup, liberoIds, firstServer) {
   return { id: uid(), opponent, date, bestOf, status: 'live', events: [{ t: 'set_start', lineup, liberoIds, firstServer }] };
-}
-function seed() {
-  const base = { ace: 0.07, serr: 0.13, rec0: 0.08, theirSerr: 0.1, kill: 0.3, aerr: 0.1, blocked: 0.07, theirErr: 0.2, block: 0.07, theirKill: 0.24, unforced: 0.05 };
-  const db = { team: 'Alameda Cadete', players: SEED_PLAYERS.map((p) => ({ ...p })), matches: [], sample: true };
-  DB = db;
-  db.matches.push(simulate(newMatch('CV Ribera', '2026-09-27', 5, [...DEFAULT_LINEUP], ['p7'], 'us'), 11, { ...base, serr: 0.17, theirErr: 0.24, kill: 0.26 }));
-  db.matches.push(simulate(newMatch('IES Montesol', '2026-10-04', 5, [...DEFAULT_LINEUP], ['p7'], 'them'), 7, { ...base, kill: 0.22, serr: 0.19, theirErr: 0.12, rec0: 0.15, theirKill: 0.3, unforced: 0.07 }));
-  db.matches.push(simulate(newMatch('Atlético Vega', '2026-10-11', 5, [...DEFAULT_LINEUP], ['p7'], 'us'), 23, { ...base, ace: 0.09, rec0: 0.06, kill: 0.33, theirErr: 0.18 }));
-  return db;
 }
 let DB = null;
 function load() { try { const raw = localStorage.getItem(KEY); return raw ? JSON.parse(raw) : null; } catch (e) { return null; } }
@@ -443,7 +369,7 @@ const finished = () => DB.matches.filter((m) => m.status === 'finished').sort((a
 const liveMatch = () => DB.matches.find((m) => m.status === 'live');
 const matchById = (id) => DB.matches.find((m) => m.id === id);
 const cur = () => (route.id && matchById(route.id)) || liveMatch();
-DB = load() || seed(); if (DB.sample === undefined) DB.sample = DB.team === 'Alameda Cadete'; save();
+DB = load() || { team: '', players: [], matches: [] };
 const roster = () => DB.players.filter((p) => p.active !== false);
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -507,8 +433,19 @@ function homeScreen() {
       <span class="grow"><span class="name" style="display:block">vs. ${esc(m.opponent)}</span><span class="sub">${fmtDate(m.date)} · ${r.sets}</span></span>${icon('back', 18).replace('m14 6-6 6 6 6', 'm10 6 6 6-6 6')}</button>`; }).join('')
       : '<div class="empty"><h3>Aún no hay partidos</h3><p class="muted">Cuando termines uno, aparecerá aquí con su resumen.</p></div>'}</div>
     <button class="link" data-a="sheet" data-v="backup">Copia de seguridad</button>
-    ${DB.sample ? '<button class="link" data-a="reset">Reiniciar datos de ejemplo</button>' : ''}
+
   </div>${tabbar()}`;
+}
+
+function welcomeScreen() {
+  const f = ui.form || {};
+  return `<div class="screen" style="justify-content:center;gap:20px">
+    <div class="stack" style="gap:8px"><span class="eyebrow">Bienvenida a VolApp</span><h1>¿Cómo se llama tu equipo?</h1>
+      <p class="muted">Después añades la plantilla y ya puedes registrar partidos. Todo se guarda solo en este móvil.</p></div>
+    <div class="field"><label for="tname">Nombre del equipo</label><input id="tname" class="input" data-form="team" value="${esc(f.team || '')}" placeholder="p. ej. Infantil B" autocomplete="off"></div>
+    ${f.err ? `<p class="err">${f.err}</p>` : ''}
+    <button class="btn primary" data-a="saveTeam">Empezar</button>
+  </div>`;
 }
 
 function teamScreen() {
@@ -516,8 +453,6 @@ function teamScreen() {
   return `<div class="screen">
     <div class="row between" style="align-items:flex-end"><div style="min-width:0"><div class="eyebrow">Plantilla · ${ps.length} jugadoras</div><h1>${esc(DB.team)}</h1></div>
       <button class="back" data-a="editTeam" aria-label="Cambiar el nombre del equipo">${icon('edit', 18)}</button></div>
-    ${DB.sample ? `<div class="card sage"><span class="eyebrow">Datos de ejemplo</span><p>Este equipo y sus partidos son inventados, para probar la app. Para usarla con tu equipo, bórralos y empieza de cero.</p>
-      <button class="btn secondary wide" data-a="sheet" data-v="clearSample">Empezar con mi equipo</button></div>` : ''}
     <button class="btn primary" data-a="addPlayer">${icon('plus')} Añadir jugadora</button>
     ${ps.length ? `<div class="list">${ps.map((p) => `<div class="item" style="padding-right:8px">
       <button class="row grow" style="gap:12px;text-align:left;min-height:44px" data-a="go" data-v="player:${p.id}">
@@ -829,9 +764,6 @@ function sheetHtml() {
   } else if (s.kind === 'team') {
     inner = `<h3>Nombre del equipo</h3><div class="field"><label for="tname">Nombre</label><input id="tname" class="input" data-form="team" value="${esc(ui.form.team)}" placeholder="p. ej. Infantil B" autocomplete="off"></div>
       ${ui.form.err ? `<p class="err">${ui.form.err}</p>` : ''}<button class="btn primary" data-a="saveTeam">Guardar</button>`;
-  } else if (s.kind === 'clearSample') {
-    inner = `<h3>¿Borrar los datos de ejemplo?</h3><p class="muted">Se borran las 12 jugadoras y los 3 partidos inventados. Después pones el nombre de tu equipo y añades tu plantilla.</p>
-      <button class="btn primary" style="background:var(--red)" data-a="clearSample">Sí, borrar y empezar</button>`;
   } else if (s.kind === 'discard') {
     const dm = cur();
     inner = `<h3>¿Borrar el partido contra ${esc(dm ? dm.opponent : '')}?</h3><p class="muted">Se pierden todas sus jugadas y estadísticas. No se puede deshacer.</p>
@@ -881,7 +813,6 @@ const H = {
   tab: (v) => { stack.length = 0; route = { name: v }; ui.sheet = null; render(true); },
   go: (v) => { const [name, id] = v.split(':'); go({ name, id }); },
   back,
-  reset: () => { try { localStorage.removeItem(KEY); } catch (e) { /* ignore */ } DB = seed(); save(); route = { name: 'home' }; stack.length = 0; toast('Datos de ejemplo restaurados'); render(true); },
   openLive: () => go({ name: 'live', id: liveMatch().id }),
   leaveLive: () => { ui.sel = null; back(); },
   newMatch: () => {
@@ -943,8 +874,12 @@ const H = {
   nextSetEdit: () => { const m = cur(); const nx = nextSetStart(m, replay(m)); ui.nextSet = { lineup: [...nx.lineup], first: nx.firstServer }; ui.sheet = { kind: 'nextSet' }; render(); },
   nextFirst: (v) => { ui.nextSet.first = v; render(); },
   editTeam: () => { ui.form = { team: DB.team, err: '' }; ui.sheet = { kind: 'team' }; render(); },
-  saveTeam: () => { const t = (ui.form.team || '').trim(); if (!t) { ui.form.err = 'Escribe un nombre.'; return render(); } DB.team = t; save(); ui.sheet = null; toast('Nombre guardado'); render(); },
-  clearSample: () => { DB = { team: 'Mi equipo', players: [], matches: [], sample: false }; save(); stack.length = 0; route = { name: 'team' }; ui.form = { team: '', err: '' }; ui.sheet = { kind: 'team' }; render(true); },
+  saveTeam: () => {
+    const t = ((ui.form && ui.form.team) || '').trim(); if (!t) { ui.form = { ...ui.form, err: 'Escribe un nombre.' }; return render(); }
+    const isNew = !DB.team; DB.team = t; save(); ui.sheet = null; ui.form = null;
+    if (isNew) { route = { name: 'team' }; stack.length = 0; toast('Ahora añade a tus jugadoras'); return render(true); }
+    toast('Nombre guardado'); render();
+  },
   discardMatch: () => { const m = cur(); DB.matches = DB.matches.filter((x) => x !== m); save(); ui.sheet = null; ui.sel = null; stack.length = 0; route = { name: 'home' }; toast('Partido borrado'); render(true); },
   editPlayer: (v) => { const p = P(v); ui.form = { id: v, name: p.name, n: String(p.n), pos: p.pos, err: '' }; ui.sheet = { kind: 'player' }; render(); },
   delPlayer: () => {
@@ -1001,7 +936,8 @@ const app = document.getElementById('app');
 function render(scrollTop) {
   const focusId = document.activeElement && document.activeElement.id; const caret = document.activeElement && document.activeElement.selectionStart;
   let html = '';
-  if (route.name === 'home') html = homeScreen();
+  if (!DB.team) html = welcomeScreen();
+  else if (route.name === 'home') html = homeScreen();
   else if (route.name === 'team') html = teamScreen();
   else if (route.name === 'season') html = seasonScreen();
   else if (route.name === 'player') html = playerScreen(route.id);

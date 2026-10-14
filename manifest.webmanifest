@@ -1,6 +1,6 @@
 {
-  "name": "Rotación",
-  "short_name": "Rotación",
+  "name": "VolApp",
+  "short_name": "VolApp",
   "description": "Estadísticas de voleibol en directo",
   "lang": "es",
   "start_url": "./",
