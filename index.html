@@ -388,7 +388,7 @@ const attEff = (ps) => (ps.att.n ? (ps.att.kill - ps.att.err - ps.att.blk) / ps.
 // log. Inside Google Apps Script the log is shared through a spreadsheet, so
 // several phones can record at the same time. Elsewhere it stays on this phone.
 const SHARED = !!(window.google && google.script && google.script.run);
-const KEYS = SHARED ? { log: 'volapp-shared-log', ver: 'volapp-shared-ver', pending: 'volapp-shared-pending' } : { log: 'volapp-log', ver: 'volapp-log-ver', pending: 'volapp-pending' };
+const KEYS = SHARED ? { log: 'volapp-shared-log', ver: 'volapp-shared-ver', pending: 'volapp-shared-pending', gen: 'volapp-shared-gen' } : { log: 'volapp-log', ver: 'volapp-log-ver', pending: 'volapp-pending', gen: 'volapp-gen' };
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* storage blocked */ } },
@@ -397,6 +397,7 @@ let log = store.get(KEYS.log, []);      // operations confirmed by the spreadshe
 let ver = store.get(KEYS.ver, 0);       // how many spreadsheet rows this phone already has
 let pending = store.get(KEYS.pending, []); // recorded here, not yet sent
 let acked = [];                         // sent and confirmed, not yet pulled back
+let gen = store.get(KEYS.gen, '');      // which data set the log belongs to; changes when it is wiped
 let me = store.get('volapp-name', '');
 const sync = { error: '', state: SHARED ? 'connecting' : 'local', loaded: !SHARED || log.length > 0, inflight: null, timer: null };
 const newId = () => uid() + uid();
@@ -447,7 +448,17 @@ function commit(...ops) {
 function call(fn, ...args) {
   return new Promise((resolve, reject) => google.script.run.withSuccessHandler(resolve).withFailureHandler(reject)[fn](...args));
 }
+/** Drops everything held on this phone, e.g. after the team data was wiped. */
+function clearLocal(keepPending) {
+  log = []; ver = 0; acked = []; if (!keepPending) pending = [];
+  store.set(KEYS.log, log); store.set(KEYS.ver, 0); store.set(KEYS.pending, pending);
+}
 function applyRemote(r) {
+  if (r.gen && r.gen !== gen) {
+    // The data was wiped or replaced: start over from what the spreadsheet holds.
+    const first = !gen; gen = r.gen; store.set(KEYS.gen, gen);
+    if (log.length || acked.length) { clearLocal(first); r.regen = true; return true; }
+  }
   if (r.reset) { log = []; ver = 0; acked = []; store.set(KEYS.log, log); store.set(KEYS.ver, 0); return true; }
   if (r.ops.length) {
     log.push(...r.ops); ver = r.ver; store.set(KEYS.log, log); store.set(KEYS.ver, ver);
@@ -464,13 +475,13 @@ function flush() {
       for (let guard = 0; guard < 100; guard++) {
         const batch = pending.slice(0, 200);
         if (batch.length) setSync('saving');
-        const r = batch.length ? await call('push', batch, ver) : await call('pull', ver);
+        const r = batch.length ? await call('push', batch, ver, gen) : await call('pull', ver);
         if (batch.length) {
           const sent = new Set(batch.map((o) => o.cid));
           acked.push(...batch); pending = pending.filter((o) => !sent.has(o.cid)); store.set(KEYS.pending, pending);
         }
         changed = applyRemote(r) || changed;
-        if (!r.more && !r.reset && !pending.length) break;
+        if (!r.more && !r.reset && !r.regen && !pending.length) break;
       }
       sync.loaded = true; sync.error = ''; setSync('ok');
     } catch (e) {
@@ -878,6 +889,9 @@ function sheetHtml() {
   } else if (s.kind === 'team') {
     inner = `<h3>Nombre del equipo</h3><div class="field"><label for="tname">Nombre</label><input id="tname" class="input" data-form="team" value="${esc(ui.form.team)}" placeholder="p. ej. Infantil B" autocomplete="off"></div>
       ${ui.form.err ? `<p class="err">${ui.form.err}</p>` : ''}<button class="btn primary" data-a="saveTeam">Guardar</button>`;
+  } else if (s.kind === 'wipe') {
+    inner = `<h3>¿Borrar todo y empezar de cero?</h3><p class="muted">Se borran el equipo, la plantilla y todos los partidos${SHARED ? ' para todo el equipo, en todos los móviles' : ''}. No se puede deshacer.</p>
+      <button class="btn primary" style="background:var(--red)" data-a="wipe">Sí, borrar todo</button>`;
   } else if (s.kind === 'discard') {
     const dm = cur();
     inner = `<h3>¿Borrar el partido contra ${esc(dm ? dm.opponent : '')}?</h3><p class="muted">Se pierden todas sus jugadas y estadísticas. No se puede deshacer.</p>
@@ -888,7 +902,9 @@ function sheetHtml() {
       <button class="btn primary" data-a="exportData">${icon('share', 20)} Enviar copia</button>
       ${f.out ? `<div class="field"><label for="exp">Copia (selecciónala y cópiala)</label><textarea id="exp" class="input" readonly>${esc(f.out)}</textarea></div>` : ''}
       <div class="field"><label for="imp">Restaurar una copia</label><textarea id="imp" class="input" data-form="imp" placeholder="Pega aquí el texto de una copia">${esc(f.imp || '')}</textarea></div>
-      ${f.err ? `<p class="err">${f.err}</p>` : ''}<button class="btn secondary wide" data-a="importData">Restaurar</button>`;
+      ${f.err ? `<p class="err">${f.err}</p>` : ''}<button class="btn secondary wide" data-a="importData">Restaurar</button>
+      <div class="card dark" style="gap:8px;margin-top:6px"><b>Empezar de cero</b><p class="muted" style="font-size:14px">Borra el equipo, la plantilla y todos los partidos${SHARED ? ' en todos los móviles' : ''}.</p>
+        <button class="btn ghost wide" style="color:var(--red-s)" data-a="sheet" data-v="wipe">Borrar todo</button></div>`;
   } else if (s.kind === 'whoami') {
     inner = `<h3>¿Cómo te llamas?</h3><p class="muted">Así se verá quién apunta cada jugada. Se guarda solo en este móvil.</p>
       <div class="field"><label for="mename">Tu nombre</label><input id="mename" class="input" data-form="me" value="${esc((ui.form && ui.form.me) || '')}" placeholder="p. ej. Vic" autocomplete="off"></div>
@@ -1020,6 +1036,14 @@ const H = {
     const m = cur(); const old = m.events.find((e) => e.id === ui.sheet.id); if (!old) { ui.sheet = { kind: 'history' }; return render(); }
     const [cause, kind] = v.split('|');
     commit({ t: 'ev_set', mid: m.id, eid: old.id, ev: { ...old, cause, kind } }); ui.sheet = { kind: 'history' }; toast('Punto corregido'); render();
+  },
+  wipe: async () => {
+    ui.sheet = null; ui.sel = null; stack.length = 0; route = { name: 'home' };
+    if (SHARED) {
+      try { const r = await call('reset'); clearLocal(); gen = r.gen; store.set(KEYS.gen, gen); applyRemote(r); }
+      catch (e) { toast('No se ha podido borrar: ' + ((e && e.message) || 'error')); return render(); }
+    } else clearLocal();
+    rebuild(); toast('Todo borrado'); render(true);
   },
   saveName: () => { me = ((ui.form && ui.form.me) || '').trim(); store.set('volapp-name', me); ui.sheet = null; ui.form = null; if (me) toast(`Hola, ${me}`); render(); },
   editName: () => { ui.form = { me }; ui.sheet = { kind: 'whoami' }; render(); },
