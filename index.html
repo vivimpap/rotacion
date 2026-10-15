@@ -136,7 +136,7 @@ button.card:active { transform: scale(.985); }
 .pl .ball { position: absolute; top: 5px; right: 6px; }
 .pl.lib { background: #EFD9B8; }
 .pl.sel { background: var(--orange); }
-.panel { background: var(--raised); border-radius: var(--r-xl); padding: 12px; display: flex; flex-direction: column; gap: 10px; flex: 1; min-height: 150px; }
+.panel { overflow: auto; background: var(--raised); border-radius: var(--r-xl); padding: 12px; display: flex; flex-direction: column; gap: 10px; flex: 1; min-height: 150px; }
 .panel .hint { text-align: center; color: var(--tx-m); font-size: 14px; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
@@ -209,6 +209,8 @@ button.card:active { transform: scale(.985); }
 .steps i.on { background: var(--orange); }
 .choice { min-height: 96px; border-radius: var(--r-lg); background: var(--raised); font-family: var(--display); font-size: 20px; font-weight: 700; border: 2px solid transparent; }
 .choice.on { border-color: var(--orange); background: rgba(235,110,58,.14); }
+.setcard { margin: auto 0; display: flex; flex-direction: column; align-items: center; text-align: center; gap: 8px; animation: fade .25s; }
+.setcard h2 { font-size: 30px; }
 .overlay-card { position: absolute; inset: 0; background: rgba(42,41,37,.92); border-radius: var(--r-xl); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 20px; text-align: center; z-index: 2; animation: fade .25s; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 @media (max-height: 640px) { .side .pts { font-size: 48px; } .pl { min-height: 60px; } .act { min-height: 52px; } }
@@ -292,6 +294,10 @@ function replay(m) {
 const courtOf = (st) => (st.rot ? st.rot.map((id) => (st.libero && id === st.libero.replaced ? st.libero.id : id)) : []);
 function apply(st, ev, i, m) {
   const entry = { i, ev, set: st.setNo, note: null };
+  if (ev.t === 'end' && !st.finished && st.setNo) {
+    st.finished = true; st.endedEarly = true; st.needSetStart = false; entry.set = st.setNo;
+    const s = st.sets[st.sets.length - 1]; entry.score = [s.us, s.them]; st.log.push(entry); return;
+  }
   if (st.finished || (ev.t !== 'set_start' && st.needSetStart) || (ev.t === 'set_start' && !st.needSetStart)) { entry.ignored = true; st.log.push(entry); return; }
   switch (ev.t) {
     case 'set_start':
@@ -569,10 +575,13 @@ function tabbar() {
   const tabs = [['home', 'Inicio', 'home'], ['team', 'Equipo', 'team'], ['season', 'Temporada', 'season']];
   return `<nav class="tabbar" aria-label="Secciones"><div class="track">${tabs.map(([n, l, i]) => `<button class="tab ${route.name === n ? 'on' : ''}" data-a="tab" data-v="${n}" aria-label="${l}">${icon(i, 20)}${route.name === n ? l : ''}</button>`).join('')}</div></nav>`;
 }
+function outcome(st) { return st.setsUs > st.setsThem ? 'win' : st.setsUs < st.setsThem ? 'loss' : 'tie'; }
+const OUTCOME = { win: ['Victoria', 'G', 'win'], loss: ['Derrota', 'P', 'loss'], tie: ['Empate', 'E', 'quiet'] };
 function resultLine(m) {
-  const st = replay(m); const won = st.setsUs > st.setsThem;
-  return { st, won, text: `${won ? 'Victoria' : 'Derrota'} ${st.setsUs}–${st.setsThem}`, sets: st.sets.map((s) => `${s.us}–${s.them}`).join(' · ') };
+  const st = replay(m); const o = outcome(st); const won = o === 'win';
+  return { st, won, o, chip: OUTCOME[o][2], letter: OUTCOME[o][1], text: `${OUTCOME[o][0]} ${st.setsUs}–${st.setsThem}`, sets: st.sets.map((s) => `${s.us}–${s.them}`).join(' · ') };
 }
+const setChip = (s) => (s.winner === 'us' ? 'win' : s.winner === 'them' ? 'loss' : 'light');
 function stackBar(a, b, ca, cb, label) {
   const tot = a + b || 1;
   return `<div class="stackbar" role="img" aria-label="${label}">${a ? `<div style="flex:${a};background:${ca}">${a}</div>` : ''}${b ? `<div style="flex:${b};background:${cb}">${b}</div>` : ''}</div>`;
@@ -604,7 +613,7 @@ function homeScreen() {
     ${roster().filter((p) => !p.lib).length < 6 ? '<p class="muted" style="text-align:center;font-size:14px">Para empezar un partido, añade antes tu plantilla en Equipo.</p>' : ''}
     <div class="row between" style="margin-top:4px"><h3>Jugados</h3><span class="chip quiet">${past.length}</span></div>
     <div class="list">${past.length ? past.map((m) => { const r = resultLine(m); return `<button class="item" data-a="go" data-v="summary:${m.id}">
-      <span class="chip ${r.won ? 'win' : 'loss'}">${r.won ? 'G' : 'P'} ${r.st.setsUs}–${r.st.setsThem}</span>
+      <span class="chip ${r.chip}">${r.letter} ${r.st.setsUs}–${r.st.setsThem}</span>
       <span class="grow"><span class="name" style="display:block">vs. ${esc(m.opponent)}</span><span class="sub">${fmtDate(m.date)} · ${r.sets}</span></span>${icon('back', 18).replace('m14 6-6 6 6 6', 'm10 6 6 6-6 6')}</button>`; }).join('')
       : '<div class="empty"><h3>Aún no hay partidos</h3><p class="muted">Cuando termines uno, aparecerá aquí con su resumen.</p></div>'}</div>
     ${SHARED ? `<button class="link" data-a="editName">${me ? `Apuntas como ${esc(me)} · cambiar` : 'Pon tu nombre'}</button>` : ''}
@@ -656,7 +665,7 @@ function seasonScreen() {
   const per = ms.map((m) => ({ m, s: statsOf([m]), r: resultLine(m) }));
   return `<div class="screen">
     <div><div class="eyebrow">${esc(DB.team)} · ${ms.length} partidos</div><h1>Temporada</h1></div>
-    <div class="row wrap">${per.map(({ m, r }) => `<span class="chip ${r.won ? 'win' : 'loss'}">${fmtDate(m.date)} · ${r.st.setsUs}–${r.st.setsThem}</span>`).join('')}</div>
+    <div class="row wrap">${per.map(({ m, r }) => `<span class="chip ${r.chip}">${fmtDate(m.date)} · ${r.st.setsUs}–${r.st.setsThem}</span>`).join('')}</div>
     <div class="card cream">
       <span class="eyebrow">¿De dónde salen los puntos?</span>
       <p class="insight">${pct(c.ourWinner / (ourTot || 1))} de nuestros puntos los ganamos nosotras; el resto nos los regala el rival.</p>
@@ -726,7 +735,7 @@ function liveScreen() {
   const pl = (i, z) => { const id = ct[i]; const p = P(id);
     return `<div class="pl ${p.lib ? 'lib' : ''}" aria-label="${esc(p.name)}, zona ${z}"><span class="zone">${z}</span>${z === 1 && st.serving === 'us' ? `<span class="ball">${ballSvg()}</span>` : ''}<span class="pn">${p.n}</span><span class="pnm">${esc(first(id))}</span></div>`; };
   const courtHtml = `<div class="court"><div class="net"></div>${pl(3, 4)}${pl(2, 3)}${pl(1, 2)}${pl(4, 5)}${pl(5, 6)}${pl(0, 1)}
-    ${st.needSetStart || st.finished ? overlay(m, st) : ''}</div>`;
+</div>`;
   const tb = `<div class="toolbar">
     <button class="tool undo" data-a="undo" ${m.events.length <= 1 ? 'disabled style="opacity:.4"' : ''}>${icon('undo', 20)}Deshacer</button>
     <button class="tool" data-a="sheet" data-v="history">${icon('list', 20)}Historial</button>
@@ -737,17 +746,17 @@ function liveScreen() {
 }
 function overlay(m, st) {
   if (st.finished) {
-    const won = st.setsUs > st.setsThem;
-    return `<div class="overlay-card"><span class="eyebrow">Partido terminado</span><h2>${won ? 'Victoria' : 'Derrota'} ${st.setsUs}–${st.setsThem}</h2>
-      <p class="muted">${st.sets.map((s) => `${s.us}–${s.them}`).join(' · ')}</p><button class="btn primary" data-a="go" data-v="summary:${m.id}">Ver resumen</button></div>`;
+    return `<div class="setcard"><span class="eyebrow">Partido terminado</span><h2>${OUTCOME[outcome(st)][0]} ${st.setsUs}–${st.setsThem}</h2>
+      <p class="muted">${st.sets.map((s) => `${s.us}–${s.them}`).join(' · ')}</p><button class="btn primary" data-a="go" data-v="summary:${m.id}">Ver resumen</button><p class="muted" style="font-size:12px">¿Te has equivocado? Pulsa Deshacer.</p></div>`;
   }
   const s = st.sets[st.sets.length - 1]; const nx = nextSetStart(m, st);
-  return `<div class="overlay-card"><span class="eyebrow">Set ${st.setNo} ${s.winner === 'us' ? 'para nosotras' : `para ${esc(m.opponent)}`}</span>
-    <h2 class="num">${s.us}–${s.them}</h2><p class="muted">Sets ${st.setsUs}–${st.setsThem} · En el set ${st.setNo + 1} saca ${nx.firstServer === 'us' ? 'nuestro equipo' : esc(m.opponent)}</p>
-    <button class="btn primary" data-a="startSet">Empezar set ${st.setNo + 1}</button><button class="btn ghost wide" data-a="nextSetEdit">Cambiar alineación o saque</button></div>`;
+  return `<div class="setcard"><span class="eyebrow">Set ${st.setNo} ${s.winner === 'us' ? 'para nosotras' : `para ${esc(m.opponent)}`} · Sets ${st.setsUs}–${st.setsThem}</span>
+    <div class="grid2" style="width:100%"><button class="act us" data-a="startSet">Empezar set ${st.setNo + 1}</button><button class="act neu" data-a="nextSetEdit">Cambiar alineación o saque</button></div>
+    <p class="muted" style="font-size:13px">En el set ${st.setNo + 1} saca ${nx.firstServer === 'us' ? 'nuestro equipo' : esc(m.opponent)}.</p>
+    <button class="link" style="min-height:36px" data-a="endMatch">Terminar el partido aquí</button></div>`;
 }
 function panel(m, st) {
-  if (st.needSetStart || st.finished) return '<p class="hint" style="margin:auto">Puedes deshacer el último punto si hace falta.</p>';
+  if (st.needSetStart || st.finished) return overlay(m, st);
   const side = ui.sel && ui.sel.quick;
   if (!side) {
     return `<div class="grid2" style="flex:1"><button class="act us big" data-a="quick" data-v="us">+1 Nosotras</button><button class="act them big" data-a="quick" data-v="them">+1 ${esc(m.opponent.length > 10 ? 'Rival' : m.opponent)}</button></div>`;
@@ -774,7 +783,8 @@ function summaryScreen(id) {
     ${header(`vs. ${m.opponent}`, fmtDate(m.date))}
     <div class="card ${r.won ? 'cream' : 'sage'}">
       <span class="eyebrow">Resultado</span><h1>${r.text}</h1>
-      <div class="row wrap">${st.sets.map((s) => `<span class="chip ${s.winner === 'us' ? 'win' : 'loss'}">${s.us}–${s.them}</span>`).join('')}</div>
+      <div class="row wrap">${st.sets.map((s) => `<span class="chip ${setChip(s)}">${s.us}–${s.them}${s.winner ? '' : ' · sin acabar'}</span>`).join('')}</div>
+      ${st.endedEarly ? '<p class="muted" style="font-size:13px">Partido terminado antes de tiempo.</p>' : ''}
     </div>
 
     <div class="card cream">
@@ -915,7 +925,7 @@ function sheetHtml() {
       <div class="pills"><button class="pill ${n.first === 'us' ? 'on' : ''}" data-a="nextFirst" data-v="us">Sacamos</button><button class="pill ${n.first === 'them' ? 'on' : ''}" data-a="nextFirst" data-v="them">Saca el rival</button></div>
       <button class="btn primary" data-a="startSet">Empezar set</button>`;
   }
-  if (s.kind === 'history') inner += '<button class="btn ghost wide" style="color:var(--red-s)" data-a="sheet" data-v="discard">Descartar este partido</button>';
+  if (s.kind === 'history') inner += `${st && !st.finished && st.setNo ? '<button class="btn secondary wide" data-a="endMatch">Terminar el partido aquí</button>' : ''}<button class="btn ghost wide" style="color:var(--red-s)" data-a="sheet" data-v="discard">Descartar este partido</button>`;
   return `<div class="scrim" data-a="closeSheet"><div class="sheet" role="dialog" aria-modal="true" data-stop="1"><div class="grab"></div>${inner}<button class="btn ghost wide" data-a="closeSheet">Cerrar</button></div></div>`;
 }
 function describe(ev, m) {
@@ -924,6 +934,7 @@ function describe(ev, m) {
   if (ev.t === 'point') return CAUSE_ONE[ev.cause] + (ev.kind ? ` · ${KIND_LABEL[ev.kind] || ''}` : '');
   if (ev.t === 'sub') return `Cambio: entra ${first(ev.in)} por ${first(ev.out)}`;
   if (ev.t === 'libero') return ev.dir === 'in' ? `Líbero: entra ${first(ev.lid)} por ${first(ev.pid)}` : 'Líbero: sale';
+  if (ev.t === 'end') return 'Partido terminado aquí';
   if (ev.t === 'timeout') return `Tiempo muerto ${ev.side === 'us' ? 'nuestro' : 'del rival'}`;
   return '';
 }
@@ -1044,6 +1055,10 @@ const H = {
       catch (e) { toast('No se ha podido borrar: ' + ((e && e.message) || 'error')); return render(); }
     } else clearLocal();
     rebuild(); toast('Todo borrado'); render(true);
+  },
+  endMatch: () => {
+    const m = cur(); if (!m) return; const ev = { id: newId(), t: 'end' }; if (me) ev.by = me;
+    ui.sheet = null; ui.sel = null; commit({ t: 'ev_add', mid: m.id, eid: ev.id, ev }); vibrate([30, 60, 30]); toast('Partido terminado'); render();
   },
   saveName: () => { me = ((ui.form && ui.form.me) || '').trim(); store.set('volapp-name', me); ui.sheet = null; ui.form = null; if (me) toast(`Hola, ${me}`); render(); },
   editName: () => { ui.form = { me }; ui.sheet = { kind: 'whoami' }; render(); },
