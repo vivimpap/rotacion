@@ -807,10 +807,76 @@ function summaryScreen(id) {
       ${rotWheel(S)}
     </div>
 
-    <button class="btn primary" data-a="share">${icon('share', 20)} Compartir resumen</button>
+    <button class="btn primary" data-a="share" data-v="${m.id}">${icon('share', 20)} Compartir resumen</button>
     <button class="link" data-a="sheet" data-v="discard">Borrar este partido</button>
   </div>`;
 }
+// ---------- Share image ------------------------------------------------------
+function shareText(m) {
+  const r = resultLine(m); const c = statsOf([m]).causes;
+  return `${DB.team} ${r.st.setsUs}–${r.st.setsThem} ${m.opponent} (${r.sets})\n`
+    + `Nuestros ${c.ourWinner + c.theirError} puntos: ${c.ourWinner} ganados y ${c.theirError} errores del rival.\n`
+    + `Sus ${c.theirWinner + c.ourError} puntos: ${c.theirWinner} ganados y ${c.ourError} errores nuestros.`;
+}
+function shareImage(m) {
+  // Drawn at twice 1080×1350 so text stays sharp after WhatsApp recompresses it.
+  const W = 1080, SCALE = 2, cv = document.createElement('canvas');
+  const g = cv.getContext('2d'); const r = resultLine(m); const st = r.st; const S = statsOf([m]); const c = S.causes;
+  const css = getComputedStyle(document.documentElement); const col = (v) => css.getPropertyValue(v).trim();
+  const C = { bg: col('--bg'), cream: col('--cream'), sage: col('--sage'), ink: col('--ink'), orange: col('--orange'), green: col('--green'), greenS: col('--green-s'), red: col('--red'), redS: col('--red-s'), mute: 'rgba(243,240,220,.62)', inkM: 'rgba(42,41,37,.62)' };
+  const D = "'Space Grotesk', system-ui, sans-serif", B = "'Inter Tight', system-ui, sans-serif";
+  const rr = (x, y, w, h, rad, fill) => {
+    rad = Math.min(rad, w / 2, h / 2); g.beginPath();
+    // Hand-made rounded rectangle: works on older iPhones without roundRect.
+    g.moveTo(x + rad, y); g.arcTo(x + w, y, x + w, y + h, rad); g.arcTo(x + w, y + h, x, y + h, rad); g.arcTo(x, y + h, x, y, rad); g.arcTo(x, y, x + w, y, rad); g.closePath();
+    g.fillStyle = fill; g.fill();
+  };
+  const text = (t, x, y, font, fill, align = 'left') => { g.font = font; g.fillStyle = fill; g.textAlign = align; g.fillText(t, x, y); };
+  const lines = (t, maxW, font) => { g.font = font; const out = []; let line = ''; for (const w of t.split(' ')) { const test = line ? line + ' ' + w : w; if (g.measureText(test).width > maxW && line) { out.push(line); line = w; } else line = test; } if (line) out.push(line); return out; };
+  const wrap = (t, x, y, maxW, lh, font, fill) => { const ls = lines(t, maxW, font); ls.forEach((l, i) => text(l, x, y + i * lh, font, fill)); return y + (ls.length - 1) * lh; };
+  const P = 72;
+  // Measure first so the canvas fits however many lines the texts take.
+  const insightFont = `600 44px ${D}`, insightW = W - 2 * P - 96;
+  const insightLines = lines(c.ourError > c.theirError ? `Les regalamos ${c.ourError} puntos y ellos a nosotras ${c.theirError}.` : `Nos regalaron ${c.theirError} puntos y nosotras solo ${c.ourError}.`, insightW, insightFont).length;
+  const teamLines = lines(DB.team, W - 2 * P, `700 62px ${D}`).length;
+  const shift = (teamLines - 1) * 70;
+  const cardTop = 610 + shift, insightEnd = cardTop + 135 + (insightLines - 1) * 54, cardH = insightEnd + 500 - cardTop;
+  const H = cardTop + cardH + 130;
+  cv.width = W * SCALE; cv.height = H * SCALE; g.scale(SCALE, SCALE);
+  g.fillStyle = C.bg; g.fillRect(0, 0, W, H);
+  text(fmtDate(m.date).toUpperCase(), P, 120, `600 32px ${B}`, C.mute);
+  wrap(DB.team, P, 190, W - 2 * P, 70, `700 62px ${D}`, C.cream);
+  text(`vs. ${m.opponent}`, P, 270 + shift, `500 42px ${B}`, C.mute);
+  // Result card
+  rr(P, 320 + shift, W - 2 * P, 250, 44, st.setsUs > st.setsThem ? C.cream : C.sage);
+  text(r.text, P + 48, 440 + shift, `700 104px ${D}`, C.ink);
+  let x = P + 48;
+  for (const s of st.sets) {
+    const label = `${s.us}–${s.them}`; g.font = `700 34px ${D}`; const w = g.measureText(label).width + 44;
+    rr(x, 478 + shift, w, 58, 29, s.winner === 'us' ? C.green : s.winner === 'them' ? C.red : C.sage); text(label, x + w / 2, 519 + shift, `700 34px ${D}`, C.ink, 'center'); x += w + 14;
+  }
+  // Points card
+  rr(P, cardTop, W - 2 * P, cardH, 44, C.cream);
+  text('¿CÓMO LLEGAN LOS PUNTOS?', P + 48, cardTop + 70, `600 28px ${B}`, C.inkM);
+  const ourTot = c.ourWinner + c.theirError, theirTot = c.theirWinner + c.ourError;
+  const insight = c.ourError > c.theirError ? `Les regalamos ${c.ourError} puntos y ellos a nosotras ${c.theirError}.` : `Nos regalaron ${c.theirError} puntos y nosotras solo ${c.ourError}.`;
+  const y = wrap(insight, P + 48, cardTop + 135, insightW, 54, insightFont, C.ink);
+  const bar = (label, a, b, ca, cb, top) => {
+    text(label, P + 48, top, `500 30px ${B}`, C.inkM);
+    const bw = W - 2 * P - 96, tot = a + b || 1, aw = Math.max(a ? 70 : 0, (bw - 8) * a / tot), bwid = bw - 8 - aw;
+    if (a) { rr(P + 48, top + 20, aw, 76, 20, ca); text(String(a), P + 48 + aw / 2, top + 72, `700 36px ${D}`, C.ink, 'center'); }
+    if (b) { rr(P + 48 + aw + 8, top + 20, bwid, 76, 20, cb); text(String(b), P + 48 + aw + 8 + bwid / 2, top + 72, `700 36px ${D}`, C.ink, 'center'); }
+  };
+  bar(`Nuestros ${ourTot} puntos`, c.ourWinner, c.theirError, C.green, C.greenS, y + 75);
+  bar(`Sus ${theirTot} puntos`, c.theirWinner, c.ourError, C.red, C.redS, y + 215);
+  const lg = [['Puntos nuestros', C.green], ['Errores del rival', C.greenS], ['Puntos del rival', C.red], ['Errores nuestros', C.redS]];
+  lg.forEach(([l, cc], i) => { const lx = P + 48 + (i % 2) * 440, ly = y + 385 + Math.floor(i / 2) * 52; rr(lx, ly - 26, 30, 30, 8, cc); text(l, lx + 46, ly, `500 30px ${B}`, C.ink); });
+  // Footer
+  g.beginPath(); g.arc(P + 12, H - 60, 12, 0, Math.PI * 2); g.fillStyle = C.orange; g.fill();
+  text('VolApp', P + 36, H - 49, `700 32px ${D}`, C.cream);
+  return cv.toDataURL('image/png');
+}
+
 function momentum(set) {
   const W = 320, H = 130, pad = 8, mid = H / 2; const v = set.momentum; const n = v.length;
   const max = Math.max(4, ...v.map(Math.abs)); const x = (i) => pad + (i * (W - 2 * pad)) / Math.max(1, n - 1); const y = (d) => mid - (d / max) * (mid - pad);
@@ -899,6 +965,13 @@ function sheetHtml() {
   } else if (s.kind === 'team') {
     inner = `<h3>Nombre del equipo</h3><div class="field"><label for="tname">Nombre</label><input id="tname" class="input" data-form="team" value="${esc(ui.form.team)}" placeholder="p. ej. Infantil B" autocomplete="off"></div>
       ${ui.form.err ? `<p class="err">${ui.form.err}</p>` : ''}<button class="btn primary" data-a="saveTeam">Guardar</button>`;
+  } else if (s.kind === 'share') {
+    const sh = ui.share || {};
+    inner = `<h3>Compartir resumen</h3>
+      <img src="${sh.img}" alt="Resumen del partido" style="width:100%;border-radius:20px;display:block;-webkit-touch-callout:default">
+      <p class="muted" style="font-size:14px;text-align:center">Mantén pulsada la imagen → <b>Guardar en Fotos</b> o <b>Compartir</b>.</p>
+      <div class="grid2"><button class="btn primary" style="font-size:16px" data-a="shareNative">${icon('share', 18)} Compartir</button><button class="btn secondary" data-a="copyText">Copiar texto</button></div>
+      ${sh.showText ? `<textarea class="input" readonly style="user-select:text;-webkit-user-select:text">${esc(sh.text)}</textarea>` : ''}`;
   } else if (s.kind === 'wipe') {
     inner = `<h3>¿Borrar todo y empezar de cero?</h3><p class="muted">Se borran el equipo, la plantilla y todos los partidos${SHARED ? ' para todo el equipo, en todos los móviles' : ''}. No se puede deshacer.</p>
       <button class="btn primary" style="background:var(--red)" data-a="wipe">Sí, borrar todo</button>`;
@@ -1071,7 +1144,26 @@ const H = {
   toggle: (v) => { ui.open[v] = !ui.open[v]; render(); },
   momSet: (v) => { ui.momSet = +v; render(); },
   rot: (v) => { ui.rotSel = ui.rotSel === +v ? null : +v; render(); },
-  share: () => toast('En la app se genera una imagen para compartir'),
+  share: async (id) => {
+    const m = matchById(id || route.id); if (!m) return;
+    try { if (document.fonts && document.fonts.ready) await document.fonts.ready; } catch (e) { /* fonts optional */ }
+    ui.share = { img: shareImage(m), text: shareText(m), id: m.id };
+    ui.sheet = { kind: 'share' }; render();
+  },
+  shareNative: async () => {
+    const sh = ui.share; if (!sh) return;
+    try {
+      const blob = await (await fetch(sh.img)).blob();
+      const file = new File([blob], 'volapp-resumen.png', { type: 'image/png' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], text: sh.text }); return; }
+      throw new Error('no-share');
+    } catch (e) { if (e && e.name === 'AbortError') return; toast('Mantén pulsada la imagen para guardarla o compartirla'); }
+  },
+  copyText: async () => {
+    const sh = ui.share; if (!sh) return;
+    try { await navigator.clipboard.writeText(sh.text); toast('Resumen copiado: pégalo en WhatsApp'); }
+    catch (e) { ui.share.showText = true; render(); }
+  },
   addPlayer: () => { ui.form = { name: '', n: '', pos: 'receptora', err: '' }; ui.sheet = { kind: 'player' }; render(); },
   formPos: (v) => { ui.form.pos = v; render(); },
   savePlayer: () => {
