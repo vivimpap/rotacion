@@ -478,6 +478,21 @@ function setSync(state) {
   document.querySelectorAll('[data-sync]').forEach((el) => { el.outerHTML = el.dataset.sync === 'dot' ? syncDot() : syncBadge(); });
 }
 
+/** Reads a pasted backup, undoing what chat and notes apps tend to do to it. */
+function parseBackup(text) {
+  let t = String(text)
+    .replace(/[“”„‟″«»]/g, '"').replace(/[‘’‚′]/g, "'")
+    .replace(/[​-‍⁠﻿]/g, '').replace(/[  ]/g, ' ');
+  const a = t.indexOf('{'), b = t.lastIndexOf('}');
+  if (a < 0) throw new Error('No encuentro ninguna copia en el texto. Tiene que empezar por una llave {.');
+  if (b < a) throw new Error(`La copia está cortada: le falta el final (${t.length} caracteres). Vuelve a copiarla entera.`);
+  t = t.slice(a, b + 1);
+  let d;
+  try { d = JSON.parse(t); } catch (e) { throw new Error(`La copia está incompleta o dañada (${t.length} caracteres). Vuelve a copiarla entera, sin pasar por Notas.`); }
+  if (!d || !Array.isArray(d.players) || !Array.isArray(d.matches)) throw new Error('Ese texto no es una copia de VolApp.');
+  return d;
+}
+
 function newMatch(opponent, date, bestOf, lineup, liberoIds, firstServer) {
   return { id: newId(), opponent, date, bestOf, events: [{ id: newId(), t: 'set_start', lineup, liberoIds, firstServer }] };
 }
@@ -1028,12 +1043,11 @@ const H = {
   },
   importData: () => {
     try {
-      const d = JSON.parse(((ui.form && ui.form.imp) || '').trim());
-      if (!d || !Array.isArray(d.players) || !Array.isArray(d.matches)) throw new Error('bad');
+      const d = parseBackup((ui.form && ui.form.imp) || '');
       if (!SHARED) { log = []; store.set(KEYS.log, log); }
       commit(...opsFromDb(d)); ui.sheet = null; stack.length = 0; route = { name: 'home' };
       toast(SHARED ? 'Copia añadida a los datos del equipo' : 'Copia restaurada'); render(true);
-    } catch (e) { ui.form.err = 'Ese texto no es una copia válida. Pégala entera, desde la primera llave hasta la última.'; render(); }
+    } catch (e) { ui.form.err = e.message; render(); }
   },
   sheet: (v) => { if (v === 'backup') ui.form = {}; ui.sheet = { kind: v }; render(); },
   closeSheet: () => { ui.sheet = null; render(); },
