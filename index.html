@@ -370,7 +370,7 @@ let ver = store.get(KEYS.ver, 0);       // how many spreadsheet rows this phone 
 let pending = store.get(KEYS.pending, []); // recorded here, not yet sent
 let acked = [];                         // sent and confirmed, not yet pulled back
 let me = store.get('volapp-name', '');
-const sync = { state: SHARED ? 'connecting' : 'local', loaded: !SHARED || log.length > 0, inflight: null, timer: null };
+const sync = { error: '', state: SHARED ? 'connecting' : 'local', loaded: !SHARED || log.length > 0, inflight: null, timer: null };
 const newId = () => uid() + uid();
 
 function opsFromDb(db) {
@@ -444,8 +444,11 @@ function flush() {
         changed = applyRemote(r) || changed;
         if (!r.more && !r.reset && !pending.length) break;
       }
-      sync.loaded = true; setSync('ok');
-    } catch (e) { setSync('offline'); }
+      sync.loaded = true; sync.error = ''; setSync('ok');
+    } catch (e) {
+      sync.error = String((e && e.message) || e || ''); setSync(navigator.onLine === false ? 'offline' : 'error');
+      if (!sync.loaded) render();
+    }
     sync.inflight = null;
     if (changed || !wasLoaded) { rebuild(); render(); }
   })();
@@ -459,6 +462,7 @@ function schedule() {
 function syncLabel() {
   const n = pending.length;
   if (sync.state === 'offline') return [`Sin conexión${n ? ` · ${n} sin enviar` : ''}`, 'var(--red-s)'];
+  if (sync.state === 'error') return [`Error al sincronizar${n ? ` · ${n} sin enviar` : ''}`, 'var(--red-s)'];
   if (sync.state === 'connecting') return ['Conectando…', 'var(--ochre)'];
   if (n || sync.state === 'saving') return ['Guardando…', 'var(--ochre)'];
   return ['Al día', 'var(--green-s)'];
@@ -571,11 +575,12 @@ function homeScreen() {
 }
 
 function connectingScreen() {
-  const off = sync.state === 'offline';
+  const off = sync.state === 'offline', err = sync.state === 'error';
   return `<div class="screen" style="justify-content:center;align-items:center;text-align:center;gap:14px">
-    <h2>${off ? 'Sin conexión' : 'Conectando con el equipo…'}</h2>
-    <p class="muted">${off ? 'La primera vez hace falta internet para descargar los datos del equipo.' : 'Un momento.'}</p>
-    ${off ? '<button class="btn primary" data-a="retry">Reintentar</button>' : ''}</div>`;
+    <h2>${off ? 'Sin conexión' : err ? 'Google ha devuelto un error' : 'Conectando con el equipo…'}</h2>
+    <p class="muted">${off ? 'La primera vez hace falta internet para descargar los datos del equipo.' : err ? 'No es tu conexión: el script de la hoja no ha respondido bien.' : 'Un momento.'}</p>
+    ${err && sync.error ? `<p class="card dark" style="font-size:13px;text-align:left;word-break:break-word;user-select:text;-webkit-user-select:text">${esc(sync.error)}</p>` : ''}
+    ${off || err ? '<button class="btn primary" data-a="retry">Reintentar</button>' : ''}</div>`;
 }
 
 function welcomeScreen() {
@@ -914,7 +919,7 @@ function sheetHtml() {
       <button class="btn primary" style="background:var(--red)" data-a="discardMatch">Sí, borrar partido</button>`;
   } else if (s.kind === 'backup') {
     const f = ui.form || {};
-    inner = `<h3>Copia de seguridad</h3><p class="muted">Los datos se guardan solo en este móvil. Al acabar cada partido, envíate una copia (por WhatsApp o correo) por si acaso.</p>
+    inner = `${sync.state === 'error' && sync.error ? `<p class="err" style="user-select:text;-webkit-user-select:text">Error al sincronizar: ${esc(sync.error)}</p>` : ''}<h3>Copia de seguridad</h3><p class="muted">Los datos se guardan solo en este móvil. Al acabar cada partido, envíate una copia (por WhatsApp o correo) por si acaso.</p>
       <button class="btn primary" data-a="exportData">${icon('share', 20)} Enviar copia</button>
       ${f.out ? `<div class="field"><label for="exp">Copia (selecciónala y cópiala)</label><textarea id="exp" class="input" readonly>${esc(f.out)}</textarea></div>` : ''}
       <div class="field"><label for="imp">Restaurar una copia</label><textarea id="imp" class="input" data-form="imp" placeholder="Pega aquí el texto de una copia">${esc(f.imp || '')}</textarea></div>
