@@ -935,10 +935,122 @@ function summaryScreen(id) {
 }
 // ---------- Share image ------------------------------------------------------
 function shareText(m) {
-  const r = resultLine(m); const c = statsOf([m]).causes;
-  return `${DB.team} ${r.st.setsUs}–${r.st.setsThem} ${m.opponent} (${r.sets})\n`
-    + `Nuestros ${c.ourWinner + c.theirError} puntos: ${c.ourWinner} ganados y ${c.theirError} errores del rival.\n`
-    + `Sus ${c.theirWinner + c.ourError} puntos: ${c.theirWinner} ganados y ${c.ourError} errores nuestros.`;
+  const r = resultLine(m); const S = statsOf([m]); const c = S.causes;
+  const lines = [`${DB.team} ${r.st.setsUs}–${r.st.setsThem} ${m.opponent} (${r.sets})`, ''];
+  lines.push(`Nuestros ${c.ourWinner + c.theirError} puntos: ${c.ourWinner} ganados y ${c.theirError} errores del rival.`);
+  lines.push(`Sus ${c.theirWinner + c.ourError} puntos: ${c.theirWinner} ganados y ${c.ourError} errores nuestros.`, '');
+  for (const k of CAUSES) if (c[k]) lines.push(`${CAUSE_LABEL[k]} (${c[k]}): ${Object.entries(S.detail[k]).sort((a, b) => b[1] - a[1]).map(([l, n]) => `${l} ${n}`).join(', ')}`);
+  if (S.withSetter) {
+    const played = ROT_ORDER.filter((z) => S.srot[z].won + S.srot[z].lost);
+    const worst = played.slice().sort((a, b) => bal(S.srot[a]) - bal(S.srot[b]))[0]; const w = S.srot[worst];
+    lines.push('', `Peor rotación: colocadora en zona ${worst} (${w.won}–${w.lost}).`);
+    lines.push(`Colocadora detrás: ${S.back.won}–${S.back.lost} · colocadora delante: ${S.front.won}–${S.front.lost}.`);
+  }
+  return lines.join('\n');
+}
+/** A 1080-wide drawing surface, drawn at 2× so it stays sharp after WhatsApp recompresses it. */
+function canvasKit(H) {
+  const W = 1080, SCALE = 2, cv = document.createElement('canvas'); cv.width = W * SCALE; cv.height = H * SCALE;
+  const g = cv.getContext('2d'); g.scale(SCALE, SCALE);
+  const css = getComputedStyle(document.documentElement); const col = (v) => css.getPropertyValue(v).trim();
+  const C = { bg: col('--bg'), raised: col('--raised'), line: col('--line'), cream: col('--cream'), sage: col('--sage'), ink: col('--ink'), orange: col('--orange'), green: col('--green'), greenS: col('--green-s'), red: col('--red'), redS: col('--red-s'), mute: 'rgba(243,240,220,.62)', inkM: 'rgba(42,41,37,.62)' };
+  const D = "'Space Grotesk', system-ui, sans-serif", B = "'Inter Tight', system-ui, sans-serif";
+  const rr = (x, y, w, h, rad, fill) => { rad = Math.min(rad, w / 2, h / 2); g.beginPath(); g.moveTo(x + rad, y); g.arcTo(x + w, y, x + w, y + h, rad); g.arcTo(x + w, y + h, x, y + h, rad); g.arcTo(x, y + h, x, y, rad); g.arcTo(x, y, x + w, y, rad); g.closePath(); g.fillStyle = fill; g.fill(); };
+  const text = (t, x, y, font, fill, align = 'left') => { g.font = font; g.fillStyle = fill; g.textAlign = align; g.fillText(t, x, y); };
+  const lines = (t, maxW, font) => { g.font = font; const out = []; let line = ''; for (const w of t.split(' ')) { const test = line ? line + ' ' + w : w; if (g.measureText(test).width > maxW && line) { out.push(line); line = w; } else line = test; } if (line) out.push(line); return out; };
+  const wrap = (t, x, y, maxW, lh, font, fill) => { const ls = lines(t, maxW, font); ls.forEach((l, i) => text(l, x, y + i * lh, font, fill)); return y + (ls.length - 1) * lh; };
+  g.fillStyle = C.bg; g.fillRect(0, 0, W, H);
+  return { W, H, P: 72, cv, g, C, D, B, rr, text, lines, wrap };
+}
+/** Top line and footer shared by the detail pages. */
+function pageFrame(k, m, title, page, total) {
+  const { W, H, P, g, C, D, B, text } = k; const r = resultLine(m);
+  text(`${fmtDate(m.date).toUpperCase()} · ${DB.team.toUpperCase()} ${r.st.setsUs}–${r.st.setsThem} ${m.opponent.toUpperCase()}`.slice(0, 60), P, 110, `600 28px ${B}`, C.mute);
+  text(title, P, 185, `700 62px ${D}`, C.cream);
+  g.beginPath(); g.arc(P + 12, H - 60, 12, 0, Math.PI * 2); g.fillStyle = C.orange; g.fill();
+  text('VolApp', P + 36, H - 49, `700 32px ${D}`, C.cream);
+  text(`${page}/${total}`, W - P, H - 49, `600 28px ${B}`, C.mute, 'right');
+}
+function pageDetail(m, total) {
+  const k = canvasKit(1350); const { W, P, C, D, B, rr, text } = k; const S = statsOf([m]); const c = S.causes;
+  pageFrame(k, m, 'Desglose de puntos', 2, total);
+  const max = Math.max(1, ...CAUSES.flatMap((ck) => Object.values(S.detail[ck])));
+  let y = 270;
+  for (const ck of CAUSES) {
+    if (!c[ck]) continue;
+    const color = { ourWinner: C.green, theirError: C.greenS, theirWinner: C.red, ourError: C.redS }[ck];
+    rr(P, y - 30, 34, 34, 10, color); text(CAUSE_LABEL[ck], P + 52, y, `700 38px ${D}`, C.cream); text(String(c[ck]), W - P, y, `700 40px ${D}`, C.cream, 'right');
+    y += 54;
+    for (const [label, n] of Object.entries(S.detail[ck]).sort((a, b) => b[1] - a[1])) {
+      text(label, P + 52, y, `500 30px ${B}`, C.mute);
+      const x0 = P + 430, bw = W - P - 80 - x0; rr(x0, y - 24, bw, 26, 13, C.raised); rr(x0, y - 24, Math.max(26, bw * n / max), 26, 13, color);
+      text(String(n), W - P, y, `700 30px ${D}`, C.cream, 'right'); y += 46;
+    }
+    y += 30;
+  }
+  return k.cv.toDataURL('image/png');
+}
+function pageMomentum(m, total) {
+  const k = canvasKit(1350); const { W, H, P, g, C, D, B, rr, text, wrap } = k; const st = replay(m);
+  pageFrame(k, m, 'Momentum', 3, total);
+  const subEnd = wrap('Diferencia de puntos a lo largo de cada set. Arriba, vamos ganando; abajo, perdiendo.', P, 240, W - 2 * P, 36, `500 28px ${B}`, C.mute);
+  const n = st.sets.length || 1; const top = subEnd + 50, bottom = H - 130, slot = (bottom - top) / n;
+  st.sets.forEach((set, i) => {
+    const y0 = top + i * slot; const ch = slot - 70; const mid = y0 + 50 + ch / 2;
+    text(`Set ${i + 1}`, P, y0 + 36, `700 32px ${D}`, C.cream);
+    text(`${set.us}–${set.them}`, W - P, y0 + 36, `700 32px ${D}`, set.us > set.them ? C.greenS : set.us < set.them ? C.redS : C.cream, 'right');
+    rr(P, y0 + 50, W - 2 * P, ch, 20, C.raised);
+    const v = set.momentum; const max = Math.max(4, ...v.map(Math.abs)); const x = (j) => P + 16 + (j * (W - 2 * P - 32)) / Math.max(1, v.length - 1); const y = (d) => mid - (d / max) * (ch / 2 - 12);
+    const path = () => { g.beginPath(); v.forEach((d, j) => (j ? g.lineTo(x(j), y(d)) : g.moveTo(x(j), y(d)))); };
+    for (const [clipTop, clipH, fill] of [[mid - ch / 2, ch / 2, C.green], [mid, ch / 2, C.red]]) {
+      g.save(); g.beginPath(); g.rect(P, clipTop, W - 2 * P, clipH); g.clip();
+      path(); g.lineTo(x(v.length - 1), mid); g.lineTo(x(0), mid); g.closePath(); g.fillStyle = fill; g.globalAlpha = 0.85; g.fill(); g.restore();
+    }
+    g.setLineDash([6, 8]); g.strokeStyle = C.mute; g.lineWidth = 2; g.beginPath(); g.moveTo(P + 16, mid); g.lineTo(W - P - 16, mid); g.stroke(); g.setLineDash([]);
+    path(); g.strokeStyle = C.cream; g.lineWidth = 3; g.lineJoin = 'round'; g.stroke();
+  });
+  return k.cv.toDataURL('image/png');
+}
+function pageRotations(m, total) {
+  const k = canvasKit(1350); const { W, P, g, C, D, B, rr, text, wrap } = k; const S = statsOf([m]);
+  pageFrame(k, m, 'Rotaciones', 4, total);
+  const bySetter = !!S.withSetter;
+  const keys = bySetter ? ROT_ORDER : [0, 1, 2, 3, 4, 5];
+  const get = (z) => (bySetter ? S.srot[z] : S.rot[z]); const label = (z) => (bySetter ? `Z${z}` : `R${z + 1}`);
+  const played = keys.filter((z) => get(z).won + get(z).lost);
+  if (!played.length) { text('Sin puntos apuntados.', P, 300, `500 34px ${B}`, C.mute); return k.cv.toDataURL('image/png'); }
+  const worst = played.slice().sort((a, b) => bal(get(a)) - bal(get(b)) || get(b).lost - get(a).lost)[0]; const w = get(worst);
+  const b = (x) => `${bal(x) > 0 ? '+' : ''}${bal(x)}`;
+  const yIns = wrap(bySetter ? `Peor rotación: colocadora en zona ${worst} (${b(w)}).` : `Peor rotación: ${label(worst)} (${b(w)}).`, P, 260, W - 2 * P, 52, `600 42px ${D}`, C.cream);
+  // Wheel
+  const cx = W / 2, cy = yIns + 290, rO = 230, rI = 132, gap = 0.05; const maxAbs = Math.max(1, ...keys.map((z) => Math.abs(bal(get(z)))));
+  keys.forEach((z, i) => {
+    const r = get(z), n = r.won + r.lost, bb = bal(r);
+    const a0 = -Math.PI / 2 - Math.PI / 6 + (i * Math.PI) / 3 + gap / 2, a1 = a0 + Math.PI / 3 - gap;
+    g.beginPath(); g.arc(cx, cy, rO, a0, a1); g.arc(cx, cy, rI, a1, a0, true); g.closePath();
+    g.globalAlpha = !n || !bb ? 1 : 0.35 + 0.65 * (Math.abs(bb) / maxAbs); g.fillStyle = !n ? C.line : bb > 0 ? C.green : bb < 0 ? C.red : C.sage; g.fill(); g.globalAlpha = 1;
+    if (z === worst) { g.lineWidth = 8; g.strokeStyle = C.orange; g.stroke(); }
+    const am = (a0 + a1) / 2, lr = (rO + rI) / 2;
+    text(label(z), cx + lr * Math.cos(am), cy + lr * Math.sin(am) - 6, `600 24px ${B}`, C.ink, 'center');
+    text(n ? b(r) : '—', cx + lr * Math.cos(am), cy + lr * Math.sin(am) + 28, `700 34px ${D}`, C.ink, 'center');
+  });
+  text(bySetter ? 'Colocadora' : 'Peor', cx, cy - 12, `500 26px ${B}`, C.mute, 'center'); text(label(worst), cx, cy + 34, `700 54px ${D}`, C.cream, 'center');
+  // Worst rotation detail
+  let y = cy + rO + 70;
+  text(`${w.won}–${w.lost} · sideout ${w.recv ? pct(w.so / w.recv) : '—'}`, P, y, `700 36px ${D}`, C.cream);
+  const lost = ['ourError', 'theirWinner'].filter((ck) => w.causes && w.causes[ck]).map((ck) => `${CAUSE_LABEL[ck]} ${w.causes[ck]}`).join(' · ');
+  if (lost) text(`Cómo perdemos ahí: ${lost}`, P, y + 46, `500 28px ${B}`, C.mute);
+  // Setter back vs front
+  if (bySetter) {
+    y += 90; const tw = (W - 2 * P - 20) / 2;
+    [[S.back, 'Colocadora detrás', '3 atacantes delante'], [S.front, 'Colocadora delante', '2 atacantes delante']].forEach(([gr, t1, t2], i) => {
+      const x = P + i * (tw + 20); rr(x, y, tw, 160, 28, C.raised);
+      text(t1, x + 24, y + 46, `700 30px ${D}`, C.cream); text(t2, x + 24, y + 80, `500 24px ${B}`, C.mute);
+      text(b(gr), x + 24, y + 136, `700 44px ${D}`, bal(gr) > 0 ? C.greenS : bal(gr) < 0 ? C.redS : C.cream);
+      text(`${gr.won}–${gr.lost}`, x + tw - 24, y + 134, `500 26px ${B}`, C.mute, 'right');
+    });
+  }
+  return k.cv.toDataURL('image/png');
 }
 function shareImage(m) {
   // Drawn at twice 1080×1350 so text stays sharp after WhatsApp recompresses it.
@@ -996,6 +1108,7 @@ function shareImage(m) {
   // Footer
   g.beginPath(); g.arc(P + 12, H - 60, 12, 0, Math.PI * 2); g.fillStyle = C.orange; g.fill();
   text('VolApp', P + 36, H - 49, `700 32px ${D}`, C.cream);
+  text('1/4', W - P, H - 49, `600 28px ${B}`, C.mute, 'right');
   return cv.toDataURL('image/png');
 }
 
@@ -1150,9 +1263,9 @@ function sheetHtml() {
   } else if (s.kind === 'share') {
     const sh = ui.share || {};
     inner = `<h3>Compartir resumen</h3>
-      <img src="${sh.img}" alt="Resumen del partido" style="width:100%;border-radius:20px;display:block;-webkit-touch-callout:default">
-      <p class="muted" style="font-size:14px;text-align:center">Mantén pulsada la imagen → <b>Guardar en Fotos</b> o <b>Compartir</b>.</p>
-      <div class="grid2"><button class="btn primary" style="font-size:16px" data-a="shareNative">${icon('share', 18)} Compartir</button><button class="btn secondary" data-a="copyText">Copiar texto</button></div>
+      <p class="muted" style="font-size:14px">${sh.imgs.length} imágenes con todo el resumen. <b>Compartir</b> las manda juntas; si no se puede, mantén pulsada cada una → <b>Guardar en Fotos</b>.</p>
+      ${sh.imgs.map(([name, url], i) => `<span class="grouplabel">${i + 1}. ${name}</span><img src="${url}" alt="${name}" style="width:100%;border-radius:20px;display:block;-webkit-touch-callout:default">`).join('')}
+      <div class="grid2"><button class="btn primary" style="font-size:16px" data-a="shareNative">${icon('share', 18)} Compartir todo</button><button class="btn secondary" data-a="copyText">Copiar texto</button></div>
       ${sh.showText ? `<textarea class="input" readonly style="user-select:text;-webkit-user-select:text">${esc(sh.text)}</textarea>` : ''}`;
   } else if (s.kind === 'how') {
     inner = `<h3>+1 ${s.side === 'us' ? 'Nosotras' : esc(m.opponent)} · ¿cómo?</h3>${pointGrid(s.side, 'quickCause')}`;
@@ -1442,15 +1555,15 @@ const H = {
   share: async (id) => {
     const m = matchById(id || route.id); if (!m) return;
     try { if (document.fonts && document.fonts.ready) await document.fonts.ready; } catch (e) { /* fonts optional */ }
-    ui.share = { img: shareImage(m), text: shareText(m), id: m.id };
+    const total = 4;
+    ui.share = { imgs: [['Resultado', shareImage(m)], ['Desglose', pageDetail(m, total)], ['Momentum', pageMomentum(m, total)], ['Rotaciones', pageRotations(m, total)]], text: shareText(m), id: m.id };
     ui.sheet = { kind: 'share' }; render();
   },
   shareNative: async () => {
     const sh = ui.share; if (!sh) return;
     try {
-      const blob = await (await fetch(sh.img)).blob();
-      const file = new File([blob], 'volapp-resumen.png', { type: 'image/png' });
-      if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], text: sh.text }); return; }
+      const files = await Promise.all(sh.imgs.map(async ([name, url], i) => new File([await (await fetch(url)).blob()], `volapp-${i + 1}-${name.toLowerCase()}.png`, { type: 'image/png' })));
+      if (navigator.canShare && navigator.canShare({ files })) { await navigator.share({ files }); return; }
       throw new Error('no-share');
     } catch (e) { if (e && e.name === 'AbortError') return; toast('Mantén pulsada la imagen para guardarla o compartirla'); }
   },
