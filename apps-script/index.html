@@ -212,6 +212,29 @@ button.pl:disabled { color: var(--ink); opacity: 1; }
 .setcard { margin: auto 0; display: flex; flex-direction: column; align-items: center; text-align: center; gap: 8px; animation: fade .25s; }
 .setcard h2 { font-size: 30px; }
 .overlay-card { position: absolute; inset: 0; background: rgba(42,41,37,.92); border-radius: var(--r-xl); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 20px; text-align: center; z-index: 2; animation: fade .25s; }
+/* Live: the scoreboard halves are the buttons that add a point. */
+.scores2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.tap { display: flex; flex-direction: column; align-items: center; padding: 8px 6px 8px; border-radius: var(--r-lg); border: 2px solid var(--line); background: rgba(243,240,220,.06); min-width: 0; transition: transform .1s, background .15s; }
+.tap:active { transform: scale(.97); }
+.tap.us { background: rgba(235,110,58,.16); border-color: rgba(235,110,58,.55); }
+.tap .tname { font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--tx-m); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tap.serving .tname { color: var(--orange); }
+.tap .pts { font-family: var(--display); font-weight: 700; font-size: 92px; line-height: .95; letter-spacing: -3px; font-variant-numeric: tabular-nums; }
+.tap .plus { font-size: 12px; font-weight: 700; letter-spacing: .06em; color: var(--tx-m); }
+.tap[disabled] { opacity: 1; } .tap[disabled] .plus { visibility: hidden; }
+.live .court { margin-top: auto; }
+.courthead { grid-column: 1 / -1; display: flex; justify-content: space-between; gap: 8px; font-size: 12px; font-weight: 600; color: var(--ink-m); padding: 0 4px; }
+.courthead b { color: var(--ink); }
+/* Rotation analysis */
+.minicourt { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; background: var(--sage); border-radius: var(--r-md); padding: 8px; }
+.mc { position: relative; min-height: 52px; border-radius: 12px; background: var(--cream); color: var(--ink); display: flex; flex-direction: column; align-items: center; justify-content: center; line-height: 1.1; }
+.mc b { font-family: var(--display); font-size: 18px; }
+.mc span { font-size: 12px; font-weight: 600; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 3px; }
+.mc i { position: absolute; top: 3px; left: 6px; font-size: 9px; font-style: normal; font-weight: 700; color: var(--ink-m); }
+.mc.set { background: var(--orange); }
+.balance { font-family: var(--display); font-weight: 700; font-variant-numeric: tabular-nums; }
+.balance.pos { color: var(--green-s); } .balance.neg { color: var(--red-s); }
+@media (max-height: 700px) { .tap .pts { font-size: 72px; } .live .pl { min-height: 58px; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 @media (max-height: 640px) { .side .pts { font-size: 48px; } .pl { min-height: 60px; } .act { min-height: 52px; } }
 </style>
@@ -323,7 +346,9 @@ function apply(st, ev, i, m) {
   if (st.finished || (ev.t !== 'set_start' && st.needSetStart && ev.t !== 'rules') || (ev.t === 'set_start' && !st.needSetStart)) { entry.ignored = true; st.log.push(entry); return; }
   switch (ev.t) {
     case 'set_start':
-      st.setNo += 1; entry.set = st.setNo; st.rot = [...ev.lineup]; st.liberoIds = ev.liberoIds || []; st.serving = ev.firstServer;
+      st.setNo += 1; entry.set = st.setNo; st.rot = [...ev.lineup];
+      // In a 5-1 the setter is a role: the one marked "Colocadora" in the starting six.
+      st.setterId = ev.lineup.find((id) => { const p = P(id); return p.pos === 'colocadora' && !p.lib; }) || null; st.liberoIds = ev.liberoIds || []; st.serving = ev.firstServer;
       if (ev.target) { st.target = ev.target; st.by2 = ev.by2 !== false; } else if (!m.target) st.target = st.setNo === m.bestOf ? 15 : 25;
       if (ev.bestOf !== undefined) st.bestOf = ev.bestOf;
       st.rotCount = 0; st.libero = null; st.subs = 0; st.timeouts = { us: 0, them: 0 }; st.needSetStart = false;
@@ -336,7 +361,7 @@ function apply(st, ev, i, m) {
       break;
     }
     case 'point': scorePoint(st, ev.cause, ev, entry, m); break;
-    case 'sub': st.rot = st.rot.map((id) => (id === ev.out ? ev.in : id)); st.subs += 1; break;
+    case 'sub': st.rot = st.rot.map((id) => (id === ev.out ? ev.in : id)); st.subs += 1; if (ev.out === st.setterId) st.setterId = ev.in; break;
     case 'swap': { const a = st.rot.indexOf(ev.a), b = st.rot.indexOf(ev.b); if (a >= 0 && b >= 0) { st.rot[a] = ev.b; st.rot[b] = ev.a; } break; }
     case 'rules':
       if (ev.target) st.target = ev.target; if (ev.by2 !== undefined) st.by2 = ev.by2; if (ev.bestOf !== undefined) st.bestOf = ev.bestOf;
@@ -352,7 +377,7 @@ function apply(st, ev, i, m) {
 }
 function scorePoint(st, cause, ev, entry, m) {
   const set = st.sets[st.sets.length - 1]; const w = winnerOf(cause);
-  st.points.push({ set: st.setNo, cause, winner: w, serving: st.serving, rot: st.rotCount % 6, pid: ev.pid || null, skill: ev.skill || null, out: ev.out, kind: ev.kind || null });
+  st.points.push({ set: st.setNo, cause, winner: w, serving: st.serving, rot: st.rotCount % 6, court: st.rot ? courtOf(st) : null, sz: st.rot && st.setterId ? st.rot.indexOf(st.setterId) : -1, pid: ev.pid || null, skill: ev.skill || null, out: ev.out, kind: ev.kind || null });
   set[w] += 1; set.momentum.push(set.us - set.them);
   if (w !== st.serving) {
     st.serving = w;
@@ -404,7 +429,10 @@ function detailKey(p) {
   return 'Otros fallos';
 }
 function statsOf(matches) {
-  const S = { causes: { ourWinner: 0, theirError: 0, theirWinner: 0, ourError: 0 }, detail: {}, players: {}, rot: Array.from({ length: 6 }, () => ({ won: 0, lost: 0, recv: 0, so: 0 })), receptions: [], recv: 0, so: 0 };
+  const blankRot = () => ({ won: 0, lost: 0, recv: 0, so: 0, causes: { ourWinner: 0, theirError: 0, theirWinner: 0, ourError: 0 }, lineups: {} });
+  const S = { causes: { ourWinner: 0, theirError: 0, theirWinner: 0, ourError: 0 }, detail: {}, players: {}, rot: Array.from({ length: 6 }, () => ({ won: 0, lost: 0, recv: 0, so: 0 })), receptions: [], recv: 0, so: 0,
+    // By the setter's zone (1–6): how a 5-1 team names its rotations.
+    srot: Object.fromEntries([1, 2, 3, 4, 5, 6].map((z) => [z, blankRot()])), back: blankRot(), front: blankRot(), withSetter: 0 };
   CAUSES.forEach((c) => { S.detail[c] = {}; });
   for (const m of matches) {
     const st = replay(m);
@@ -412,6 +440,16 @@ function statsOf(matches) {
       S.causes[p.cause]++; const k = detailKey(p); S.detail[p.cause][k] = (S.detail[p.cause][k] || 0) + 1;
       const r = S.rot[p.rot]; if (p.winner === 'us') r.won++; else r.lost++;
       if (p.serving === 'them') { r.recv++; S.recv++; if (p.winner === 'us') { r.so++; S.so++; } }
+      const zi = p.sz === undefined ? -1 : p.sz;
+      if (zi >= 0) {
+        S.withSetter++;
+        for (const g of [S.srot[zi + 1], zi === 0 || zi >= 4 ? S.back : S.front]) {
+          if (p.winner === 'us') g.won++; else g.lost++;
+          if (p.serving === 'them') { g.recv++; if (p.winner === 'us') g.so++; }
+          g.causes[p.cause]++;
+        }
+        const key = p.court.join(','); S.srot[zi + 1].lineups[key] = (S.srot[zi + 1].lineups[key] || 0) + 1;
+      }
     }
     for (const a of st.actions) {
       const ps = S.players[a.pid] || (S.players[a.pid] = blankPlayer());
@@ -425,6 +463,7 @@ function statsOf(matches) {
   }
   return S;
 }
+const ROT_ORDER = [1, 6, 5, 4, 3, 2]; // the setter's path through the zones as the team rotates
 const serveRate = (ps) => (ps.serve.n ? (ps.serve.n - ps.serve.err) / ps.serve.n : null);
 const recAvg = (ps) => (ps.rec.n ? ps.rec.sum / ps.rec.n : null);
 const attEff = (ps) => (ps.att.n ? (ps.att.kill - ps.att.err - ps.att.blk) / ps.att.n : null);
@@ -739,10 +778,7 @@ function seasonScreen() {
       <div class="legend">${CAUSES.map((k) => `<span><i style="background:${CAUSE_COLOR[k]}"></i>${CAUSE_LABEL[k]}</span>`).join('')}</div>
       <div class="detail"><span>Puntos que regalamos en la temporada</span><b>${c.ourError}</b><span>Puntos que nos regalan</span><b>${c.theirError}</b><span>Sideout (ganamos con su saque)</span><b>${pct(S.so / (S.recv || 1))}</b></div>
     </div>
-    <div class="card dark">
-      <div class="row between"><span class="eyebrow">Rotaciones · temporada</span><span class="muted" style="font-size:12px">toca una</span></div>
-      ${rotWheel(S)}
-    </div>
+    ${rotationCard(S, 'Rotaciones · temporada')}
   </div>${tabbar()}`;
 }
 
@@ -798,24 +834,23 @@ function liveScreen() {
   const prev = ui.lastScore; const bumpUs = prev && prev.id === m.id && prev.us !== set.us; const bumpThem = prev && prev.id === m.id && prev.them !== set.them;
   ui.lastScore = { id: m.id, us: set.us, them: set.them };
   const setDots = Array.from({ length: Math.max(st.bestOf, st.sets.length) }, (_, i) => { const s = st.sets[i]; return `<i class="${s && s.winner ? s.winner : ''}"></i>`; }).join('');
-  const server = st.serving === 'us' ? `Saca ${esc(first(ct[0]))} (#${P(ct[0]).n})` : `Saca ${esc(m.opponent)} · recibimos`;
+  const server = st.serving === 'us' ? `Saca ${esc(first(ct[0]))} (#${P(ct[0]).n})` : 'Recibimos';
+  const canTap = !st.needSetStart && !st.finished;
+  const sideBtn = (side, name, pts, bump) => `<button class="tap ${side} ${st.serving === side ? 'serving' : ''}" ${canTap ? `data-a="quick" data-v="${side}"` : 'disabled'} aria-label="Punto para ${esc(name)}">
+      <span class="tname">${st.serving === side ? '<span class="servedot"></span>' : ''}${esc(name)}</span><span class="pts ${bump ? 'bump' : ''}">${pts}</span><span class="plus">+1 punto</span></button>`;
   const scoreboard = `<div class="scoreboard">
     <div class="row between"><button class="back" style="width:36px;height:36px" data-a="leaveLive" aria-label="Salir">${icon('back', 18)}</button>
       <span class="eyebrow" style="color:var(--tx)">${syncDot()}Set ${st.setNo} · Sets ${st.setsUs}–${st.setsThem}</span><span class="setdots" aria-hidden="true">${setDots}</span></div>
-    <div class="scores">
-      <div class="side ${st.serving === 'us' ? 'serving' : ''}"><span class="tname">${st.serving === 'us' ? '<span class="servedot"></span>' : ''}${esc(DB.team)}</span><span class="pts ${bumpUs ? 'bump' : ''}">${set.us}</span></div>
-      <span class="dash">–</span>
-      <div class="side ${st.serving === 'them' ? 'serving' : ''}"><span class="tname">${st.serving === 'them' ? '<span class="servedot"></span>' : ''}${esc(m.opponent)}</span><span class="pts ${bumpThem ? 'bump' : ''}">${set.them}</span></div>
-    </div>
-    <div class="row between" style="font-size:13px"><span class="muted">${server}</span><span class="chip quiet">${st.bestOf ? `Mejor de ${st.bestOf}` : 'Sin límite'} · a ${st.target}${st.by2 ? '' : ' sin +2'} · Rot. ${(st.rotCount % 6) + 1}</span></div></div>`;
+    <div class="scores2">${sideBtn('us', DB.team, set.us, bumpUs)}${sideBtn('them', m.opponent, set.them, bumpThem)}</div>
+    <div class="row between" style="font-size:13px"><span class="muted">${canTap ? 'Toca el marcador para sumar' : ''}</span><span class="chip quiet">${st.bestOf ? `Mejor de ${st.bestOf}` : 'Sin límite'} · a ${st.target}${st.by2 ? '' : ' sin +2'}</span></div></div>`;
   const lastEv = m.events.length > 1 ? m.events[m.events.length - 1] : null;
   const lastEntry = lastEv && st.log.find((e) => e.ev === lastEv);
   const lastbar = `<div class="lastbar"><div class="what"><span>Última jugada</span><b>${lastEv ? esc(describe(lastEv, m)) : 'Aún no hay jugadas'}</b>${lastEntry && lastEntry.score && lastEv.t !== 'set_start' ? `<span>Set ${lastEntry.set} · ${lastEntry.score[0]}–${lastEntry.score[1]}${lastEv.by ? ' · ' + esc(lastEv.by) : ''}</span>` : ''}</div>
     <button class="undobtn" data-a="undo" ${lastEv ? '' : 'disabled'}>${icon('undo', 18)}Deshacer</button></div>`;
-  const canTap = !st.needSetStart && !st.finished;
   const pl = (i, z) => { const id = ct[i]; const p = P(id);
     return `<button class="pl ${p.lib ? 'lib' : ''}" ${canTap ? `data-a="courtTap" data-v="${id}"` : 'disabled'} aria-label="${esc(p.name)}, zona ${z}. Toca para cambiarla"><span class="zone">${z}</span>${z === 1 && st.serving === 'us' ? `<span class="ball">${ballSvg()}</span>` : ''}<span class="pn">${p.n}</span><span class="pnm">${esc(first(id))}</span></button>`; };
-  const courtHtml = `<div class="court"><div class="net"></div>${pl(3, 4)}${pl(2, 3)}${pl(1, 2)}${pl(4, 5)}${pl(5, 6)}${pl(0, 1)}
+  const si = st.setterId ? st.rot.indexOf(st.setterId) : -1;
+  const courtHtml = `<div class="court"><div class="courthead"><span>${si >= 0 ? `Rotación · colocadora en <b>zona ${si + 1}</b>` : `Rotación ${(st.rotCount % 6) + 1}`}</span><span>${server}</span></div><div class="net"></div>${pl(3, 4)}${pl(2, 3)}${pl(1, 2)}${pl(4, 5)}${pl(5, 6)}${pl(0, 1)}
 </div>`;
   const tb = `<div class="toolbar">
     <button class="tool" data-a="sheet" data-v="history">${icon('list', 20)}Historial</button>
@@ -823,7 +858,7 @@ function liveScreen() {
     <button class="tool" data-a="sheet" data-v="timeout" ${canTap ? '' : 'disabled style="opacity:.4"'}>${icon('clock', 20)}Tiempo</button>
     ${st.liberoIds.length ? `<button class="tool" data-a="sheet" data-v="libero" ${canTap ? '' : 'disabled style="opacity:.4"'}>${icon('shield', 20)}Líbero</button>` : ''}
     <button class="tool" data-a="openRules" ${st.finished && st.endedEarly ? 'disabled style="opacity:.4"' : ''}>${icon('season', 20)}Partido</button></div>`;
-  return `<div class="live ${ui.sel && ui.sel.quick ? 'choosing' : ''}">${scoreboard}${lastbar}${courtHtml}<div class="panel">${panel(m, st)}</div>${tb}</div>`;
+  return `<div class="live">${scoreboard}${lastbar}${canTap ? courtHtml : `<div class="panel">${overlay(m, st)}</div>`}${tb}</div>`;
 }
 function overlay(m, st) {
   if (st.finished) {
@@ -889,10 +924,7 @@ function summaryScreen(id) {
       ${momentum(set)}
     </div>
 
-    <div class="card dark">
-      <div class="row between"><span class="eyebrow">Rotaciones</span><span class="muted" style="font-size:12px">toca una</span></div>
-      ${rotWheel(S)}
-    </div>
+    ${rotationCard(S, 'Rotaciones')}
 
     <button class="btn primary" data-a="share" data-v="${m.id}">${icon('share', 20)} Compartir resumen</button>
     ${more || others ? `<div class="card dark" style="gap:10px"><b>¿Faltan sets?</b>
@@ -985,6 +1017,58 @@ function momentum(set) {
     <text x="${pad}" y="${H + 22}" fill="var(--tx-m)" font-size="11" font-family="Inter Tight, sans-serif">Máxima ventaja: ${v[peak] > 0 ? '+' : ''}${v[peak]}</text>
   </svg>`;
 }
+/** The six zones with the setter marked: no names, they are not always kept up to date. */
+function miniCourt(setterZone) {
+  const cell = (i, z) => `<div class="mc ${z === setterZone ? 'set' : ''}"><b>${z}</b>${z === setterZone ? '<span>Colocadora</span>' : ''}</div>`;
+  return `<div class="minicourt"><div class="net" style="grid-column:1/-1"></div>${cell(3, 4)}${cell(2, 3)}${cell(1, 2)}${cell(4, 5)}${cell(5, 6)}${cell(0, 1)}</div>`;
+}
+const bal = (r) => r.won - r.lost;
+const balHtml = (b) => `<span class="balance ${b > 0 ? 'pos' : b < 0 ? 'neg' : ''}">${b > 0 ? '+' : ''}${b}</span>`;
+/** Rotations by the setter's zone, with the worst one opened by default. */
+function rotationCard(S, title) {
+  if (!S.withSetter) return `<div class="card dark"><div class="row between"><span class="eyebrow">${title}</span><span class="muted" style="font-size:12px">toca una</span></div>${rotWheel(S)}</div>`;
+  const played = ROT_ORDER.filter((z) => S.srot[z].won + S.srot[z].lost);
+  const worst = played.slice().sort((a, b) => bal(S.srot[a]) - bal(S.srot[b]) || S.srot[b].lost - S.srot[a].lost)[0];
+  const best = played.slice().sort((a, b) => bal(S.srot[b]) - bal(S.srot[a]) || S.srot[b].won - S.srot[a].won)[0];
+  const sel = ui.rotSel && S.srot[ui.rotSel] && played.includes(ui.rotSel) ? ui.rotSel : worst;
+  const r = S.srot[sel];
+  const backRow = sel === 1 || sel >= 5;
+  const how = (keys, label) => { const parts = keys.filter((k) => r.causes[k]); return parts.length ? `<div class="stack" style="gap:6px"><span class="muted" style="font-size:13px">${label}</span><div class="row wrap" style="gap:6px">${parts.map((k) => `<span class="chip" style="background:${CAUSE_COLOR[k]}">${CAUSE_LABEL[k]} · ${r.causes[k]}</span>`).join('')}</div></div>` : ''; };
+  const side = (g, label, sub) => `<div class="card" style="background:var(--bg);padding:12px;gap:2px"><span style="font-weight:600;font-size:14px">${label}</span><span class="muted" style="font-size:12px">${sub}</span>
+    <span style="font-size:26px">${balHtml(bal(g))}</span><span class="muted" style="font-size:12px">${g.won}–${g.lost}${g.recv ? ` · sideout ${pct(g.so / g.recv)}` : ''}</span></div>`;
+  return `<div class="card dark">
+    <div class="row between"><span class="eyebrow">${title}</span><span class="muted" style="font-size:12px">por zona de la colocadora</span></div>
+    <p class="insight" style="font-size:18px">Peor rotación: colocadora en zona ${worst} (${balHtml(bal(S.srot[worst]))})${best !== worst && bal(S.srot[best]) > 0 ? `. Mejor: zona ${best} (${balHtml(bal(S.srot[best]))})` : ''}.</p>
+    ${setterWheel(S, sel, worst)}
+    <div class="card" style="background:var(--bg);gap:10px;padding:14px">
+      <div class="row between"><b>${sel === worst ? 'La peor · ' : ''}Colocadora en zona ${sel}</b>${balHtml(bal(r))}</div>
+      <span class="muted" style="font-size:13px">${backRow ? 'Colocadora detrás: 3 atacantes delante' : 'Colocadora delante: 2 atacantes delante'}</span>
+      ${miniCourt(sel)}
+      <div class="grid2" style="gap:8px">
+        <div class="stack" style="gap:0"><span class="muted" style="font-size:13px">Ganados – perdidos</span><b class="num" style="font-size:24px">${r.won}–${r.lost}</b></div>
+        <div class="stack" style="gap:0"><span class="muted" style="font-size:13px">Sideout (con su saque)</span><b class="num" style="font-size:24px">${r.recv ? pct(r.so / r.recv) : '—'}</b></div></div>
+      ${how(['ourError', 'theirWinner'], 'Cómo perdemos aquí')}${how(['ourWinner', 'theirError'], 'Cómo ganamos aquí')}
+    </div>
+    <div class="grid2">${side(S.back, 'Colocadora detrás', '3 atacantes delante')}${side(S.front, 'Colocadora delante', '2 atacantes delante')}</div>
+  </div>`;
+}
+function setterWheel(S, sel, worst) {
+  const W = 260, c = W / 2, rO = 112, rI = 64; const gap = 0.05; let segs = '';
+  const maxAbs = Math.max(1, ...ROT_ORDER.map((z) => Math.abs(bal(S.srot[z]))));
+  ROT_ORDER.forEach((z, i) => {
+    const r = S.srot[z]; const n = r.won + r.lost;
+    const a0 = -Math.PI / 2 - Math.PI / 6 + (i * Math.PI) / 3 + gap / 2, a1 = a0 + Math.PI / 3 - gap;
+    const p = (rad, a) => `${(c + rad * Math.cos(a)).toFixed(1)} ${(c + rad * Math.sin(a)).toFixed(1)}`;
+    const b = bal(r); const k = 0.35 + 0.65 * (Math.abs(b) / maxAbs);
+    const fill = !n ? 'var(--line)' : b > 0 ? 'var(--green)' : b < 0 ? 'var(--red)' : 'var(--sage)';
+    const am = (a0 + a1) / 2; const lr = (rO + rI) / 2;
+    segs += `<path d="M${p(rO, a0)} A${rO} ${rO} 0 0 1 ${p(rO, a1)} L${p(rI, a1)} A${rI} ${rI} 0 0 0 ${p(rI, a0)} Z" fill="${fill}" fill-opacity="${b === 0 || !n ? 1 : k}" stroke="${sel === z ? 'var(--orange)' : 'none'}" stroke-width="4" ${n ? `data-a="rot" data-v="${z}" style="cursor:pointer"` : ''}/>
+      <text x="${(c + lr * Math.cos(am)).toFixed(1)}" y="${(c + lr * Math.sin(am) - 3).toFixed(1)}" text-anchor="middle" font-size="11" font-weight="600" fill="var(--ink)" font-family="Inter Tight, sans-serif" pointer-events="none">Z${z}</text>
+      <text x="${(c + lr * Math.cos(am)).toFixed(1)}" y="${(c + lr * Math.sin(am) + 13).toFixed(1)}" text-anchor="middle" font-size="15" font-weight="700" fill="var(--ink)" font-family="Space Grotesk, sans-serif" pointer-events="none">${n ? `${b > 0 ? '+' : ''}${b}` : '—'}</text>`;
+  });
+  const center = `<text x="${c}" y="${c - 8}" text-anchor="middle" font-size="11" fill="var(--tx-m)" font-family="Inter Tight, sans-serif">Colocadora</text><text x="${c}" y="${c + 16}" text-anchor="middle" font-size="24" font-weight="700" fill="var(--tx)" font-family="Space Grotesk, sans-serif">Z${sel}</text>`;
+  return `<svg viewBox="0 0 ${W} ${W}" width="100%" style="max-width:250px;align-self:center" role="img" aria-label="Balance de puntos según la zona de la colocadora">${segs}${center}</svg>`;
+}
 function rotWheel(S) {
   const W = 260, c = W / 2, rO = 112, rI = 64; const gap = 0.05; let segs = '';
   const maxAbs = Math.max(1, ...S.rot.map((r) => Math.abs(r.won - r.lost)));
@@ -1070,6 +1154,8 @@ function sheetHtml() {
       <p class="muted" style="font-size:14px;text-align:center">Mantén pulsada la imagen → <b>Guardar en Fotos</b> o <b>Compartir</b>.</p>
       <div class="grid2"><button class="btn primary" style="font-size:16px" data-a="shareNative">${icon('share', 18)} Compartir</button><button class="btn secondary" data-a="copyText">Copiar texto</button></div>
       ${sh.showText ? `<textarea class="input" readonly style="user-select:text;-webkit-user-select:text">${esc(sh.text)}</textarea>` : ''}`;
+  } else if (s.kind === 'how') {
+    inner = `<h3>+1 ${s.side === 'us' ? 'Nosotras' : esc(m.opponent)} · ¿cómo?</h3>${pointGrid(s.side, 'quickCause')}`;
   } else if (s.kind === 'merge') {
     const others = DB.matches.filter((x) => x.id !== m.id && x.events.length).sort((a, b) => (b.date + b.id).localeCompare(a.date + a.id));
     inner = `<h3>Unir con otro partido</h3>
@@ -1226,8 +1312,8 @@ const H = {
     const w = ui.wiz; if (w && w.id) commit({ t: 'match_del', id: w.id });
     ui.sheet = null; ui.wiz = null; stack.length = 0; route = { name: 'home' }; toast('Partido borrado'); render(true);
   },
-  quick: (v) => { ui.sel = { quick: v }; vibrate(6); render(); },
-  quickCause: (v) => { const [cause, kind] = v.split('|'); record({ t: 'point', cause, kind }, `${winnerOf(cause) === 'us' ? '+1 nosotras' : '+1 rival'} · ${CAUSE_ONE[cause]} · ${KIND_LABEL[kind]}`); },
+  quick: (v) => { ui.sel = null; ui.sheet = { kind: 'how', side: v }; vibrate(6); render(); },
+  quickCause: (v) => { ui.sheet = null; const [cause, kind] = v.split('|'); record({ t: 'point', cause, kind }, `${winnerOf(cause) === 'us' ? '+1 nosotras' : '+1 rival'} · ${CAUSE_ONE[cause]} · ${KIND_LABEL[kind]}`); },
   cancelSel: () => { ui.sel = null; render(); },
   undo: () => {
     const m = cur(); if (!m || m.events.length <= 1) return;
@@ -1352,7 +1438,7 @@ const H = {
   liberoOut: () => { ui.sheet = null; record({ t: 'libero', dir: 'out' }, 'Sale la líbero'); },
   toggle: (v) => { ui.open[v] = !ui.open[v]; render(); },
   momSet: (v) => { ui.momSet = +v; render(); },
-  rot: (v) => { ui.rotSel = ui.rotSel === +v ? null : +v; render(); },
+  rot: (v) => { ui.rotSel = +v; render(); },
   share: async (id) => {
     const m = matchById(id || route.id); if (!m) return;
     try { if (document.fonts && document.fonts.ready) await document.fonts.ready; } catch (e) { /* fonts optional */ }
