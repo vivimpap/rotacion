@@ -146,9 +146,24 @@ button.card:active { transform: scale(.985); }
 .live.choosing .pl .zone, .live.choosing .pl .ball { display: none; }
 .live.choosing .panel { gap: 6px; min-height: 0; }
 .grouplabel { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--tx-m); }
-.toolbar { display: grid; grid-template-columns: 1.3fr 1fr 1fr 1fr 1fr; gap: 6px; padding-bottom: env(safe-area-inset-bottom, 0px); }
+.toolbar { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 6px; padding-bottom: env(safe-area-inset-bottom, 0px); }
 .tool { min-height: 56px; border-radius: var(--r-md); background: var(--raised); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; font-size: 11px; font-weight: 600; color: var(--tx-m); }
-.tool.undo { background: var(--cream); color: var(--ink); font-size: 13px; }
+.lastbar { display: flex; align-items: center; gap: 10px; background: var(--raised); border-radius: var(--r-lg); padding: 6px 6px 6px 14px; min-height: 56px; }
+.lastbar .what { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.lastbar .what b { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lastbar .what span { font-size: 12px; color: var(--tx-m); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.undobtn { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; padding: 0 14px; border-radius: var(--r-md); background: var(--cream); color: var(--ink); font-weight: 700; font-size: 15px; flex: none; }
+.undobtn:active { transform: scale(.97); }
+.undobtn[disabled] { opacity: .35; }
+.live.choosing .lastbar { min-height: 48px; padding-block: 3px; }
+button.pl { font: inherit; }
+button.pl:disabled { color: var(--ink); opacity: 1; }
+.stepper { display: flex; align-items: center; gap: 8px; }
+.stepper .val { flex: 1; text-align: center; font-family: var(--display); font-size: 34px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.stepper .sb { width: 56px; height: 56px; border-radius: var(--r-md); background: var(--raised); font-size: 26px; font-weight: 700; flex: none; }
+.who { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.who .act.on { outline: 3px solid var(--orange); outline-offset: 2px; }
+.hr { height: 1px; background: var(--line); margin: 4px 0; }
 .tool svg { width: 20px; height: 20px; }
 
 /* Sheet & toast */
@@ -268,11 +283,28 @@ const REC_COLOR = ['var(--red)', 'var(--ochre)', 'var(--green-s)', 'var(--green)
 const POS = { colocadora: 'Colocadora', opuesta: 'Opuesta', central: 'Central', receptora: 'Receptora', libero: 'Líbero' };
 
 // ---------- Engine: replay events into match state ---------------------------
+// Rules are flexible: points per set, whether you must win by 2 and how many
+// sets (0 = no limit) can change at any moment. Matches from earlier versions
+// have no `target`: they keep the official 25 / 15 in the deciding set.
+const setsNeeded = (bestOf) => (bestOf ? Math.floor(bestOf / 2) + 1 : Infinity);
 function replay(m) {
   const st = { sets: [], setNo: 0, serving: null, rot: null, rotCount: 0, libero: null, liberoIds: [], subs: 0, timeouts: { us: 0, them: 0 },
-    setsUs: 0, setsThem: 0, finished: false, needSetStart: true, points: [], actions: [], log: [] };
+    setsUs: 0, setsThem: 0, finished: false, needSetStart: true, points: [], actions: [], log: [],
+    target: m.target || 25, by2: m.by2 !== false, bestOf: m.bestOf || 0 };
   m.events.forEach((ev, i) => apply(st, ev, i, m));
   return st;
+}
+function closeSet(st, entry, winner) {
+  const set = st.sets[st.sets.length - 1];
+  set.winner = winner; set.target = st.target; set.closed = true;
+  if (winner === 'us') st.setsUs++; else if (winner === 'them') st.setsThem++;
+  const need = setsNeeded(st.bestOf);
+  if (st.setsUs >= need || st.setsThem >= need) st.finished = true; else st.needSetStart = true;
+  entry.setEnd = true;
+}
+function checkSetEnd(st, entry) {
+  const set = st.sets[st.sets.length - 1]; if (!set || set.winner) return;
+  if ((set.us >= st.target || set.them >= st.target) && (!st.by2 || Math.abs(set.us - set.them) >= 2) && set.us !== set.them) closeSet(st, entry, set.us > set.them ? 'us' : 'them');
 }
 const courtOf = (st) => (st.rot ? st.rot.map((id) => (st.libero && id === st.libero.replaced ? st.libero.id : id)) : []);
 function apply(st, ev, i, m) {
@@ -281,10 +313,19 @@ function apply(st, ev, i, m) {
     st.finished = true; st.endedEarly = true; st.needSetStart = false; entry.set = st.setNo;
     const s = st.sets[st.sets.length - 1]; entry.score = [s.us, s.them]; st.log.push(entry); return;
   }
-  if (st.finished || (ev.t !== 'set_start' && st.needSetStart) || (ev.t === 'set_start' && !st.needSetStart)) { entry.ignored = true; st.log.push(entry); return; }
+  if (ev.t === 'rules' && st.finished && !st.endedEarly) {
+    // A match closed by its number of sets goes on if the format grows (e.g. from best of 3 to best of 5).
+    if (ev.target) st.target = ev.target; if (ev.by2 !== undefined) st.by2 = ev.by2; if (ev.bestOf !== undefined) st.bestOf = ev.bestOf;
+    const need = setsNeeded(st.bestOf);
+    if (st.setsUs < need && st.setsThem < need) { st.finished = false; st.needSetStart = true; }
+    const s = st.sets[st.sets.length - 1]; entry.score = [s.us, s.them]; st.log.push(entry); return;
+  }
+  if (st.finished || (ev.t !== 'set_start' && st.needSetStart && ev.t !== 'rules') || (ev.t === 'set_start' && !st.needSetStart)) { entry.ignored = true; st.log.push(entry); return; }
   switch (ev.t) {
     case 'set_start':
       st.setNo += 1; entry.set = st.setNo; st.rot = [...ev.lineup]; st.liberoIds = ev.liberoIds || []; st.serving = ev.firstServer;
+      if (ev.target) { st.target = ev.target; st.by2 = ev.by2 !== false; } else if (!m.target) st.target = st.setNo === m.bestOf ? 15 : 25;
+      if (ev.bestOf !== undefined) st.bestOf = ev.bestOf;
       st.rotCount = 0; st.libero = null; st.subs = 0; st.timeouts = { us: 0, them: 0 }; st.needSetStart = false;
       st.sets.push({ us: 0, them: 0, momentum: [0], winner: null });
       break;
@@ -296,6 +337,12 @@ function apply(st, ev, i, m) {
     }
     case 'point': scorePoint(st, ev.cause, ev, entry, m); break;
     case 'sub': st.rot = st.rot.map((id) => (id === ev.out ? ev.in : id)); st.subs += 1; break;
+    case 'swap': { const a = st.rot.indexOf(ev.a), b = st.rot.indexOf(ev.b); if (a >= 0 && b >= 0) { st.rot[a] = ev.b; st.rot[b] = ev.a; } break; }
+    case 'rules':
+      if (ev.target) st.target = ev.target; if (ev.by2 !== undefined) st.by2 = ev.by2; if (ev.bestOf !== undefined) st.bestOf = ev.bestOf;
+      if (!st.needSetStart) checkSetEnd(st, entry);
+      break;
+    case 'set_end': { const s = st.sets[st.sets.length - 1]; closeSet(st, entry, s.us > s.them ? 'us' : s.them > s.us ? 'them' : null); break; }
     case 'libero': st.libero = ev.dir === 'in' ? { id: ev.lid, replaced: ev.pid } : null; break;
     case 'timeout': st.timeouts[ev.side] += 1; break;
   }
@@ -318,21 +365,31 @@ function scorePoint(st, cause, ev, entry, m) {
       }
     }
   }
-  const target = st.setNo === m.bestOf ? 15 : 25;
-  if ((set.us >= target || set.them >= target) && Math.abs(set.us - set.them) >= 2) {
-    set.winner = set.us > set.them ? 'us' : 'them';
-    if (set.winner === 'us') st.setsUs++; else st.setsThem++;
-    const need = m.bestOf === 5 ? 3 : 2;
-    if (st.setsUs === need || st.setsThem === need) st.finished = true; else st.needSetStart = true;
-    entry.setEnd = true;
-  }
+  checkSetEnd(st, entry);
 }
+/**
+ * How the next set starts by default: the order the team ended the set with
+ * (changes and moves included), turned back to its starting rotation.
+ */
 function nextSetStart(m, st) {
   const s1 = m.events[0]; const n = st.setNo + 1;
   const last = m.events.filter((e) => e.t === 'set_start').pop() || s1;
   const fs = n % 2 === 1 ? s1.firstServer : (s1.firstServer === 'us' ? 'them' : 'us');
-  return { t: 'set_start', lineup: [...last.lineup], liberoIds: [...last.liberoIds], firstServer: fs };
+  const k = st.rotCount % 6; const lineup = st.rot ? (k ? [...st.rot.slice(6 - k), ...st.rot.slice(0, 6 - k)] : [...st.rot]) : [...last.lineup];
+  // Deciding set of a "best of" match: 15 by default, as usual; it can be changed before starting.
+  const target = st.bestOf && n === st.bestOf && st.target === 25 ? 15 : st.target;
+  return { t: 'set_start', lineup, liberoIds: [...(last.liberoIds || [])], firstServer: fs, target, by2: st.by2 };
 }
+/** The plan for the next set, kept while the set-break lasts even if its sheet is closed. */
+function nextDraft(m, st) {
+  const key = `${m.id}:${st.setNo}:${st.bestOf}`;
+  if (!ui.nextSet || ui.nextSet.key !== key) {
+    const nx = nextSetStart(m, st);
+    ui.nextSet = { key, lineup: [...nx.lineup], first: nx.firstServer, target: nx.target, by2: nx.by2, bestOf: st.bestOf };
+  }
+  return ui.nextSet;
+}
+const rulesText = (r) => `${r.bestOf ? `Mejor de ${r.bestOf}` : 'Sets sin límite'} · a ${r.target}${r.by2 ? '' : ', sin ganar por 2'}`;
 
 // ---------- Statistics -------------------------------------------------------
 function blankPlayer() { return { serve: { n: 0, ace: 0, err: 0 }, rec: { n: 0, sum: 0 }, att: { n: 0, kill: 0, err: 0, blk: 0 }, block: 0, def: { good: 0, err: 0 }, unforced: 0, pts: 0 }; }
@@ -387,25 +444,29 @@ let ver = store.get(KEYS.ver, 0);       // how many spreadsheet rows this phone 
 let pending = store.get(KEYS.pending, []); // recorded here, not yet sent
 let acked = [];                         // sent and confirmed, not yet pulled back
 let gen = store.get(KEYS.gen, '');      // which data set the log belongs to; changes when it is wiped
-let me = store.get('volapp-name', '');
+let me = store.get('volapp-name', '');     // name shown on what this phone records
+let meId = store.get('volapp-me', '');      // player id, or 'coach'
 const sync = { error: '', state: SHARED ? 'connecting' : 'local', loaded: !SHARED || log.length > 0, inflight: null, timer: null };
 const newId = () => uid() + uid();
 
 function opsFromDb(db) {
   const ops = [];
   if (db.team) ops.push({ t: 'team', name: db.team });
+  if (db.coach) ops.push({ t: 'coach', name: db.coach });
   for (const p of db.players || []) ops.push({ t: 'player', p: { id: p.id, name: p.name, n: p.n, pos: p.pos, lib: !!p.lib, active: p.active !== false } });
   for (const m of db.matches || []) {
-    ops.push({ t: 'match', m: { id: m.id, opponent: m.opponent, date: m.date, bestOf: m.bestOf } });
+    ops.push({ t: 'match', m: matchMeta(m) });
     for (const e of m.events || []) { const ev = { ...e, id: e.id || newId() }; ops.push({ t: 'ev_add', mid: m.id, eid: ev.id, ev }); }
   }
   return ops;
 }
+const matchMeta = (m) => { const o = { id: m.id, opponent: m.opponent, date: m.date, bestOf: m.bestOf }; if (m.target) { o.target = m.target; o.by2 = m.by2 !== false; } if (m.time) o.time = m.time; if (m.place) o.place = m.place; if (m.plan) o.plan = m.plan; return o; };
 function reduceOps(ops) {
-  const db = { team: '', players: [], matches: [] }; const seen = new Set(); const players = new Map(); const matches = new Map();
+  const db = { team: '', coach: '', players: [], matches: [] }; const seen = new Set(); const players = new Map(); const matches = new Map();
   for (const o of ops) {
     if (o.cid) { if (seen.has(o.cid)) continue; seen.add(o.cid); }
     if (o.t === 'team') db.team = o.name;
+    else if (o.t === 'coach') db.coach = o.name;
     else if (o.t === 'player') players.set(o.p.id, { ...o.p });
     else if (o.t === 'player_del') players.delete(o.id);
     else if (o.t === 'match') { const old = matches.get(o.m.id); matches.set(o.m.id, { ...o.m, events: old ? old.events : [] }); }
@@ -420,10 +481,10 @@ function reduceOps(ops) {
   db.players = [...players.values()]; db.matches = [...matches.values()];
   return db;
 }
-let DB = { team: '', players: [], matches: [] };
+let DB = { team: '', coach: '', players: [], matches: [] };
 function rebuild() {
   DB = reduceOps(log.concat(acked, pending));
-  for (const m of DB.matches) m.status = m.events.length && replay(m).finished ? 'finished' : 'live';
+  for (const m of DB.matches) m.status = !m.events.length ? 'planned' : replay(m).finished ? 'finished' : 'live';
 }
 // Data saved by the first single-phone version.
 if (!SHARED && !log.length) { const old = store.get('volapp-v1', null); if (old && old.team) { log = opsFromDb(old); store.set(KEYS.log, log); } }
@@ -535,6 +596,9 @@ const liveMatch = () => DB.matches.find((m) => m.status === 'live');
 const matchById = (id) => DB.matches.find((m) => m.id === id);
 const cur = () => (route.id && matchById(route.id)) || liveMatch();
 const roster = () => DB.players.filter((p) => p.active !== false);
+const planned = () => DB.matches.filter((m) => m.status === 'planned').sort((a, b) => (a.date + (a.time || '')).localeCompare(b.date + (b.time || '')));
+const mapsUrl = (place) => 'https:' + '/' + '/www.google.com/maps/search/?api=1&query=' + encodeURIComponent(place); // Written in pieces: Apps Script strips anything after two slashes.
+const planReady = (m) => { const ids = new Set(roster().map((p) => p.id)); const l = m.plan && m.plan.lineup; return !!(l && l.length === 6 && l.every((id) => id && ids.has(id))); };
 const today = () => new Date().toISOString().slice(0, 10);
 
 // ---------- UI state & routing -----------------------------------------------
@@ -577,6 +641,12 @@ function spark(vals, w = 96, h = 30, color = 'var(--orange)') {
   const last = xy[xy.length - 1];
   return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true"><path d="${d}L${last[0]} ${h}L3 ${h}Z" fill="${color}" opacity=".15"/><path d="${d}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><circle cx="${last[0]}" cy="${last[1]}" r="3.2" fill="${color}"/></svg>`;
 }
+/** Buttons to carry on with a match that closed itself because of its set count. */
+function extendButtons(st, cls) {
+  if (st.endedEarly) return '';
+  const opts = (st.bestOf === 3 ? [[5, 'Pasar a mejor de 5']] : []).concat([[0, 'Sets sin límite']]);
+  return opts.map(([v, l]) => `<button class="${cls}" data-a="extendMatch" data-v="${v}">${l}</button>`).join('');
+}
 
 // ---------- Screens ----------------------------------------------------------
 function homeScreen() {
@@ -593,13 +663,19 @@ function homeScreen() {
     <div><div class="row between"><span class="eyebrow">${esc(DB.team)}</span>${syncBadge()}</div><h1>Partidos</h1></div>
     ${liveCard}
     ${live ? '' : `<button class="btn primary" data-a="newMatch">${icon('plus')} Nuevo partido</button>`}
-    ${roster().filter((p) => !p.lib).length < 6 ? '<p class="muted" style="text-align:center;font-size:14px">Para empezar un partido, añade antes tu plantilla en Equipo.</p>' : ''}
+    ${roster().length < 6 ? '<p class="muted" style="text-align:center;font-size:14px">Para empezar un partido, añade antes tu plantilla en Equipo.</p>' : ''}
+    ${planned().length ? `<div class="row between" style="margin-top:4px"><h3>Próximos</h3><span class="chip quiet">${planned().length}</span></div>
+    <div class="list">${planned().map((m) => { const ready = planReady(m); return `<div class="card dark" style="gap:10px">
+      <div class="row between"><span class="eyebrow">${fmtDate(m.date)}${m.time ? ` · ${esc(m.time)}` : ''}</span><span class="chip ${ready ? '' : 'quiet'}">${ready ? '6 inicial lista' : 'Sin 6 inicial'}</span></div>
+      <h3>vs. ${esc(m.opponent)}</h3>
+      ${m.place ? `<a href="${mapsUrl(m.place)}" target="_blank" rel="noopener" style="color:var(--tx-m);font-size:14px;text-underline-offset:3px">${esc(m.place)} · ver en Maps</a>` : ''}
+      <div class="grid2"><button class="btn ghost" data-a="editPlan" data-v="${m.id}">Editar</button>${live ? '<span></span>' : `<button class="btn primary" style="font-size:16px" data-a="startPlan" data-v="${m.id}">Empezar</button>`}</div></div>`; }).join('')}</div>` : ''}
     <div class="row between" style="margin-top:4px"><h3>Jugados</h3><span class="chip quiet">${past.length}</span></div>
     <div class="list">${past.length ? past.map((m) => { const r = resultLine(m); return `<button class="item" data-a="go" data-v="summary:${m.id}">
       <span class="chip ${r.chip}">${r.letter} ${r.st.setsUs}–${r.st.setsThem}</span>
       <span class="grow"><span class="name" style="display:block">vs. ${esc(m.opponent)}</span><span class="sub">${fmtDate(m.date)} · ${r.sets}</span></span>${icon('back', 18).replace('m14 6-6 6 6 6', 'm10 6 6 6-6 6')}</button>`; }).join('')
       : '<div class="empty"><h3>Aún no hay partidos</h3><p class="muted">Cuando termines uno, aparecerá aquí con su resumen.</p></div>'}</div>
-    ${SHARED ? `<button class="link" data-a="editName">${me ? `Apuntas como ${esc(me)} · cambiar` : 'Pon tu nombre'}</button>` : ''}
+    ${SHARED ? `<button class="link" data-a="editName">${me ? `Apuntas como ${esc(me)} · cambiar` : '¿Quién eres?'}</button>` : ''}
     <button class="link" data-a="sheet" data-v="backup">Copia de seguridad</button>
 
   </div>${tabbar()}`;
@@ -631,12 +707,16 @@ function teamScreen() {
     <div class="row between" style="align-items:flex-end"><div style="min-width:0"><div class="eyebrow">Plantilla · ${ps.length} jugadoras</div><h1>${esc(DB.team)}</h1></div>
       <button class="back" data-a="editTeam" aria-label="Cambiar el nombre del equipo">${icon('edit', 18)}</button></div>
     <button class="btn primary" data-a="addPlayer">${icon('plus')} Añadir jugadora</button>
+    <div class="item" style="padding-right:8px"><button class="row grow" style="gap:12px;text-align:left;min-height:44px" data-a="editCoach">
+        <span class="badge sage">${icon('team', 16)}</span>
+        <span class="grow"><span class="name" style="display:block">${DB.coach ? esc(DB.coach) : 'Añadir entrenadora'}</span><span class="sub">Entrenadora · no cuenta en la alineación</span></span></button>
+      <button class="back" style="background:var(--bg)" data-a="editCoach" aria-label="Editar entrenadora">${icon('edit', 18)}</button></div>
     ${ps.length ? `<div class="list">${ps.map((p) => `<div class="item" style="padding-right:8px">
       <button class="row grow" style="gap:12px;text-align:left;min-height:44px" data-a="editPlayer" data-v="${p.id}">
         <span class="badge ${p.lib ? 'sage' : ''}">${p.n}</span>
         <span class="grow"><span class="name" style="display:block">${esc(p.name)}</span><span class="sub">${POS[p.pos]}</span></span></button>
       <button class="back" style="background:var(--bg)" data-a="editPlayer" data-v="${p.id}" aria-label="Editar a ${esc(p.name)}">${icon('edit', 18)}</button></div>`).join('')}</div>`
-      : '<div class="empty"><h3>Sin jugadoras</h3><p class="muted">Añade al menos 6, más la líbero si tenéis.</p></div>'}
+      : '<div class="empty"><h3>Sin jugadoras</h3><p class="muted">Añade al menos 6.</p></div>'}
   </div>${tabbar()}`;
 }
 
@@ -672,26 +752,39 @@ function newMatchScreen() {
   let body = '';
   if (w.step === 1) {
     body = `<div class="field"><label for="opp">Rival</label><input id="opp" class="input" data-in="opponent" value="${esc(w.opponent)}" placeholder="p. ej. CD Las Lomas" autocomplete="off"></div>
-      <div class="field"><label for="date">Fecha</label><input id="date" class="input" type="date" data-in="date" value="${w.date}"></div>
-      <div class="field"><label>Formato</label><div class="pills"><button class="pill ${w.bestOf === 5 ? 'on' : ''}" data-a="wizBest" data-v="5">Mejor de 5</button><button class="pill ${w.bestOf === 3 ? 'on' : ''}" data-a="wizBest" data-v="3">Mejor de 3</button></div></div>
+      <div class="grid2"><div class="field"><label for="date">Fecha</label><input id="date" class="input" type="date" data-in="date" value="${w.date}"></div>
+      <div class="field"><label for="time">Hora</label><input id="time" class="input" type="time" data-in="time" value="${esc(w.time || '')}"></div></div>
+      <div class="field"><label for="place">Sitio (opcional)</label><input id="place" class="input" data-in="place" value="${esc(w.place || '')}" placeholder="p. ej. Pabellón San Pablo" autocomplete="off"></div>
+      ${rulesFields(w, 'wiz')}
+      <p class="muted" style="font-size:13px">Lo puedes cambiar durante el partido con el botón «Partido», e incluso después: si el partido se cierra por los sets, te dejará pasarlo a mejor de 5.</p>
       ${w.err ? `<p class="err">${w.err}</p>` : ''}`;
   } else if (w.step === 2) {
-    const libs = roster().filter((p) => p.lib);
+    const libs = roster().filter((p) => !w.lineup.includes(p.id)).sort((a, b) => (b.lib - a.lib) || a.n - b.n);
     body = `<p class="muted">Toca cada zona para elegir quién empieza ahí. La zona 1 es la que saca.</p>
       ${zonesHtml(w.lineup, w.first === 'us', 'wiz')}
-      <div class="field"><label>Líbero</label><div class="row wrap">${[{ id: '', name: 'Sin líbero' }, ...libs].map((l) => `<button class="chip ${w.libero === l.id ? '' : 'quiet'}" style="min-height:40px;padding:0 14px;font-size:14px" data-a="wizLib" data-v="${l.id}">${esc(l.id ? `#${l.n} ${first(l.id)}` : l.name)}</button>`).join('')}</div></div>
+      <div class="field"><label>Líbero (opcional)</label><div class="row wrap">${[{ id: '', name: 'Sin líbero' }, ...libs].map((l) => `<button class="chip ${w.libero === l.id ? '' : 'quiet'}" style="min-height:40px;padding:0 14px;font-size:14px" data-a="wizLib" data-v="${l.id}">${esc(l.id ? `#${l.n} ${first(l.id)}` : l.name)}</button>`).join('')}</div></div>
       ${w.err ? `<p class="err">${w.err}</p>` : ''}`;
   } else {
     body = `<p class="muted">¿Quién saca en el primer set? Después se alterna en cada set.</p>
       <div class="grid2"><button class="choice ${w.first === 'us' ? 'on' : ''}" data-a="wizFirst" data-v="us">Sacamos<br>nosotras</button><button class="choice ${w.first === 'them' ? 'on' : ''}" data-a="wizFirst" data-v="them">Saca<br>${esc(w.opponent)}</button></div>
-      <div class="card dark" style="gap:6px"><span class="eyebrow">Resumen</span><p><b>vs. ${esc(w.opponent)}</b> · ${fmtDate(w.date)} · Mejor de ${w.bestOf}</p><p class="muted">Saca ${esc(first(w.lineup[0]))} (#${P(w.lineup[0]).n}) si empezamos con saque.</p></div>`;
+      <div class="card dark" style="gap:6px"><span class="eyebrow">Resumen</span><p><b>vs. ${esc(w.opponent)}</b> · ${fmtDate(w.date)}</p><p class="muted">${rulesText(w)}</p><p class="muted">Saca ${esc(first(w.lineup[0]))} (#${P(w.lineup[0]).n}) si empezamos con saque.</p></div>`;
   }
-  return `<div class="screen">${header('Nuevo partido', `Paso ${w.step} de 3`)}${steps}${body}
+  return `<div class="screen">${header(w.id ? 'Partido previsto' : 'Nuevo partido', `Paso ${w.step} de 3`)}${steps}${body}
     <div style="flex:1"></div>
+    <button class="btn secondary wide" data-a="wizSave">Guardar sin empezar</button>
+    ${w.id ? '<button class="link" data-a="sheet" data-v="delPlan">Borrar este partido</button>' : ''}
     <div class="grid2">${w.step > 1 ? '<button class="btn ghost" data-a="wizPrev">Atrás</button>' : '<span></span>'}
       ${w.step < 3 ? '<button class="btn primary" data-a="wizNext">Siguiente</button>' : '<button class="btn primary" data-a="wizStart">Empezar</button>'}</div></div>`;
 }
 
+function rulesFields(r, scope) {
+  const pill = (field, v, label) => `<button class="pill ${String(r[field]) === String(v) ? 'on' : ''}" data-a="rule" data-v="${scope}:${field}:${v}">${label}</button>`;
+  return `<div class="field"><label>Puntos para ganar el set</label>
+      <div class="stepper"><button class="sb" data-a="rule" data-v="${scope}:target:-1" aria-label="Un punto menos">−</button><span class="val" aria-live="polite">${r.target}</span><button class="sb" data-a="rule" data-v="${scope}:target:+1" aria-label="Un punto más">+</button></div>
+      <div class="pills">${[15, 21, 25].map((n) => `<button class="pill ${r.target === n ? 'on' : ''}" data-a="rule" data-v="${scope}:target:=${n}">${n}</button>`).join('')}</div></div>
+    <div class="field"><label>¿Hay que ganar por 2?</label><div class="pills">${pill('by2', true, 'Sí')}${pill('by2', false, 'No')}</div></div>
+    <div class="field"><label>Sets</label><div class="pills">${pill('bestOf', 3, 'Mejor de 3')}${pill('bestOf', 5, 'Mejor de 5')}${pill('bestOf', 0, 'Sin límite')}</div></div>`;
+}
 function zonesHtml(lineup, serveUs, target) {
   const zone = (i, z) => { const id = lineup[i]; const p = id ? P(id) : null; return `<button class="zbtn ${p ? '' : 'emptyz'}" data-a="wizZone" data-v="${target}:${i}">
     <span style="position:absolute;top:6px;left:9px;font-size:11px;font-weight:700;color:var(--ink-m)">Z${z}</span>${z === 1 && serveUs ? `<span style="position:absolute;top:5px;right:6px">${ballSvg()}</span>` : ''}
@@ -704,7 +797,7 @@ function liveScreen() {
   const st = replay(m); const set = st.sets[st.sets.length - 1]; const ct = courtOf(st);
   const prev = ui.lastScore; const bumpUs = prev && prev.id === m.id && prev.us !== set.us; const bumpThem = prev && prev.id === m.id && prev.them !== set.them;
   ui.lastScore = { id: m.id, us: set.us, them: set.them };
-  const setDots = Array.from({ length: m.bestOf }, (_, i) => { const s = st.sets[i]; return `<i class="${s && s.winner ? s.winner : ''}"></i>`; }).join('');
+  const setDots = Array.from({ length: Math.max(st.bestOf, st.sets.length) }, (_, i) => { const s = st.sets[i]; return `<i class="${s && s.winner ? s.winner : ''}"></i>`; }).join('');
   const server = st.serving === 'us' ? `Saca ${esc(first(ct[0]))} (#${P(ct[0]).n})` : `Saca ${esc(m.opponent)} · recibimos`;
   const scoreboard = `<div class="scoreboard">
     <div class="row between"><button class="back" style="width:36px;height:36px" data-a="leaveLive" aria-label="Salir">${icon('back', 18)}</button>
@@ -714,29 +807,38 @@ function liveScreen() {
       <span class="dash">–</span>
       <div class="side ${st.serving === 'them' ? 'serving' : ''}"><span class="tname">${st.serving === 'them' ? '<span class="servedot"></span>' : ''}${esc(m.opponent)}</span><span class="pts ${bumpThem ? 'bump' : ''}">${set.them}</span></div>
     </div>
-    <div class="row between" style="font-size:13px"><span class="muted">${server}</span><span class="chip quiet">Rotación ${(st.rotCount % 6) + 1}</span></div></div>`;
+    <div class="row between" style="font-size:13px"><span class="muted">${server}</span><span class="chip quiet">${st.bestOf ? `Mejor de ${st.bestOf}` : 'Sin límite'} · a ${st.target}${st.by2 ? '' : ' sin +2'} · Rot. ${(st.rotCount % 6) + 1}</span></div></div>`;
+  const lastEv = m.events.length > 1 ? m.events[m.events.length - 1] : null;
+  const lastEntry = lastEv && st.log.find((e) => e.ev === lastEv);
+  const lastbar = `<div class="lastbar"><div class="what"><span>Última jugada</span><b>${lastEv ? esc(describe(lastEv, m)) : 'Aún no hay jugadas'}</b>${lastEntry && lastEntry.score && lastEv.t !== 'set_start' ? `<span>Set ${lastEntry.set} · ${lastEntry.score[0]}–${lastEntry.score[1]}${lastEv.by ? ' · ' + esc(lastEv.by) : ''}</span>` : ''}</div>
+    <button class="undobtn" data-a="undo" ${lastEv ? '' : 'disabled'}>${icon('undo', 18)}Deshacer</button></div>`;
+  const canTap = !st.needSetStart && !st.finished;
   const pl = (i, z) => { const id = ct[i]; const p = P(id);
-    return `<div class="pl ${p.lib ? 'lib' : ''}" aria-label="${esc(p.name)}, zona ${z}"><span class="zone">${z}</span>${z === 1 && st.serving === 'us' ? `<span class="ball">${ballSvg()}</span>` : ''}<span class="pn">${p.n}</span><span class="pnm">${esc(first(id))}</span></div>`; };
+    return `<button class="pl ${p.lib ? 'lib' : ''}" ${canTap ? `data-a="courtTap" data-v="${id}"` : 'disabled'} aria-label="${esc(p.name)}, zona ${z}. Toca para cambiarla"><span class="zone">${z}</span>${z === 1 && st.serving === 'us' ? `<span class="ball">${ballSvg()}</span>` : ''}<span class="pn">${p.n}</span><span class="pnm">${esc(first(id))}</span></button>`; };
   const courtHtml = `<div class="court"><div class="net"></div>${pl(3, 4)}${pl(2, 3)}${pl(1, 2)}${pl(4, 5)}${pl(5, 6)}${pl(0, 1)}
 </div>`;
   const tb = `<div class="toolbar">
-    <button class="tool undo" data-a="undo" ${m.events.length <= 1 ? 'disabled style="opacity:.4"' : ''}>${icon('undo', 20)}Deshacer</button>
     <button class="tool" data-a="sheet" data-v="history">${icon('list', 20)}Historial</button>
-    <button class="tool" data-a="sheet" data-v="sub">${icon('swap', 20)}Cambio ${st.subs}/6</button>
-    <button class="tool" data-a="sheet" data-v="timeout">${icon('clock', 20)}Tiempo</button>
-    <button class="tool" data-a="sheet" data-v="libero">${icon('shield', 20)}Líbero</button></div>`;
-  return `<div class="live ${ui.sel && ui.sel.quick ? 'choosing' : ''}">${scoreboard}${courtHtml}<div class="panel">${panel(m, st)}</div>${tb}</div>`;
+    <button class="tool" data-a="sheet" data-v="sub" ${canTap ? '' : 'disabled style="opacity:.4"'}>${icon('swap', 20)}Cambio</button>
+    <button class="tool" data-a="sheet" data-v="timeout" ${canTap ? '' : 'disabled style="opacity:.4"'}>${icon('clock', 20)}Tiempo</button>
+    ${st.liberoIds.length ? `<button class="tool" data-a="sheet" data-v="libero" ${canTap ? '' : 'disabled style="opacity:.4"'}>${icon('shield', 20)}Líbero</button>` : ''}
+    <button class="tool" data-a="openRules" ${st.finished && st.endedEarly ? 'disabled style="opacity:.4"' : ''}>${icon('season', 20)}Partido</button></div>`;
+  return `<div class="live ${ui.sel && ui.sel.quick ? 'choosing' : ''}">${scoreboard}${lastbar}${courtHtml}<div class="panel">${panel(m, st)}</div>${tb}</div>`;
 }
 function overlay(m, st) {
   if (st.finished) {
-    return `<div class="setcard"><span class="eyebrow">Partido terminado</span><h2>${OUTCOME[outcome(st)][0]} ${st.setsUs}–${st.setsThem}</h2>
-      <p class="muted">${st.sets.map((s) => `${s.us}–${s.them}`).join(' · ')}</p><button class="btn primary" data-a="go" data-v="summary:${m.id}">Ver resumen</button><p class="muted" style="font-size:12px">¿Te has equivocado? Pulsa Deshacer.</p></div>`;
+    const more = extendButtons(st, 'act neu');
+    return `<div class="setcard" style="gap:6px"><span class="eyebrow">Partido terminado · ${OUTCOME[outcome(st)][0]} ${st.setsUs}–${st.setsThem}</span>
+      ${more ? `<span class="grouplabel">¿Se sigue jugando?</span><div class="grid2" style="width:100%">${more}</div>
+      <button class="link" style="min-height:32px;font-weight:600;color:var(--tx)" data-a="go" data-v="summary:${m.id}">Ver resumen</button>`
+    : `<p class="muted" style="font-size:13px">¿Te has equivocado? Pulsa Deshacer, arriba.</p><button class="btn primary" style="min-height:48px" data-a="go" data-v="summary:${m.id}">Ver resumen</button>`}</div>`;
   }
-  const s = st.sets[st.sets.length - 1]; const nx = nextSetStart(m, st);
-  return `<div class="setcard"><span class="eyebrow">Set ${st.setNo} ${s.winner === 'us' ? 'para nosotras' : `para ${esc(m.opponent)}`} · Sets ${st.setsUs}–${st.setsThem}</span>
-    <div class="grid2" style="width:100%"><button class="act us" data-a="startSet">Empezar set ${st.setNo + 1}</button><button class="act neu" data-a="nextSetEdit">Cambiar alineación o saque</button></div>
-    <p class="muted" style="font-size:13px">En el set ${st.setNo + 1} saca ${nx.firstServer === 'us' ? 'nuestro equipo' : esc(m.opponent)}.</p>
-    <button class="link" style="min-height:36px" data-a="endMatch">Terminar el partido aquí</button></div>`;
+  const s = st.sets[st.sets.length - 1]; const nx = nextDraft(m, st);
+  const who = s.winner === 'us' ? 'para nosotras' : s.winner === 'them' ? `para ${esc(m.opponent)}` : 'en empate';
+  return `<div class="setcard"><span class="eyebrow">Set ${st.setNo} ${who} · Sets ${st.setsUs}–${st.setsThem}</span>
+    <div class="grid2" style="width:100%"><button class="act us" data-a="startSet">Empezar set ${st.setNo + 1}</button><button class="act neu" data-a="nextSetEdit">Cambiar alineación, saque o puntos</button></div>
+    <p class="muted" style="font-size:13px">Set ${st.setNo + 1} a ${nx.target}${nx.by2 ? '' : ' sin ganar por 2'} · saca ${nx.first === 'us' ? 'nuestro equipo' : esc(m.opponent)}.</p>
+    <div class="row" style="gap:14px;justify-content:center">${SHARED ? `<button class="link" style="min-height:36px" data-a="editName">Apunta ${me ? esc(me) : 'nadie'} · cambiar</button>` : ''}<button class="link" style="min-height:36px" data-a="endMatch">Terminar el partido</button></div></div>`;
 }
 function panel(m, st) {
   if (st.needSetStart || st.finished) return overlay(m, st);
@@ -762,12 +864,14 @@ function summaryScreen(id) {
   const detail = (k) => c[k] ? `<div class="detail" style="margin:0 0 6px 22px;padding-top:4px">${Object.entries(S.detail[k]).sort((a, b) => b[1] - a[1]).map(([l, n]) => `<span>${l}</span><b>${n}</b>`).join('')}</div>` : '';
   const causeRow = (k) => `<div class="row between" style="width:100%;min-height:36px"><span class="row"><i style="width:14px;height:14px;border-radius:5px;background:${CAUSE_COLOR[k]};display:block"></i><span style="font-weight:600">${CAUSE_LABEL[k]}</span></span><b class="num" style="font-size:18px">${c[k]}</b></div>${detail(k)}`;
   const set = st.sets[ui.momSet] || st.sets[0];
+  const more = st.finished ? extendButtons(st, 'btn ghost') : '';
+  const others = DB.matches.some((x) => x.id !== m.id && x.events.length);
   return `<div class="screen">
-    ${header(`vs. ${m.opponent}`, fmtDate(m.date))}
+    ${header(`vs. ${m.opponent}`, fmtDate(m.date) + (m.time ? ` · ${m.time}` : '') + (m.place ? ` · ${m.place}` : ''))}
     <div class="card ${r.won ? 'cream' : 'sage'}">
       <span class="eyebrow">Resultado</span><h1>${r.text}</h1>
-      <div class="row wrap">${st.sets.map((s) => `<span class="chip ${setChip(s)}">${s.us}–${s.them}${s.winner ? '' : ' · sin acabar'}</span>`).join('')}</div>
-      ${st.endedEarly ? '<p class="muted" style="font-size:13px">Partido terminado antes de tiempo.</p>' : ''}
+      <div class="row wrap">${st.sets.map((s) => `<span class="chip ${setChip(s)}">${s.us}–${s.them}${s.winner ? '' : s.closed ? ' · empate' : ' · sin acabar'}</span>`).join('')}</div>
+      ${st.endedEarly && st.sets.some((x) => !x.closed) ? '<p class="muted" style="font-size:13px">El último set se quedó a medias: no cuenta para el resultado.</p>' : ''}
     </div>
 
     <div class="card cream">
@@ -791,6 +895,9 @@ function summaryScreen(id) {
     </div>
 
     <button class="btn primary" data-a="share" data-v="${m.id}">${icon('share', 20)} Compartir resumen</button>
+    ${more || others ? `<div class="card dark" style="gap:10px"><b>¿Faltan sets?</b>
+      ${more ? `<p class="muted" style="font-size:14px">Si se jugaron más sets de los previstos, cambia el formato y sigue apuntando en este mismo partido.</p><div class="grid2">${more}</div>` : ''}
+      ${others ? `<p class="muted" style="font-size:14px">Si el partido se apuntó en dos partes, júntalas en uno solo.</p><button class="btn ghost wide" data-a="sheet" data-v="merge">Unir con otro partido</button>` : ''}</div>` : ''}
     <button class="link" data-a="sheet" data-v="discard">Borrar este partido</button>
   </div>`;
 }
@@ -906,8 +1013,8 @@ function sheetHtml() {
   let inner = '';
   const m = cur(); const st = m && replay(m); const ct = st && courtOf(st);
   if (s.kind === 'history') {
-    const entries = st.log.filter((e) => !e.ignored).slice().reverse();
-    inner = `<h3>Historial</h3><p class="muted" style="font-size:13px">Corrige un punto con el lápiz o bórralo con la papelera.</p><div class="list">${entries.map((e) => `<div class="item" style="min-height:56px;padding:8px 10px 8px 14px">
+    const entries = st.log.filter((e) => !e.ignored && e.ev.t !== 'sub' && e.ev.t !== 'swap').slice().reverse();
+    inner = `<h3>Historial</h3><p class="muted" style="font-size:13px">Corrige cualquier jugada con el lápiz o bórrala con la papelera. El marcador se recalcula solo.</p><div class="list">${entries.map((e) => `<div class="item" style="min-height:56px;padding:8px 10px 8px 14px">
       <span class="grow"><span class="name" style="display:block;font-size:15px">${esc(describe(e.ev, m))}</span><span class="sub">Set ${e.set} · ${e.score[0]}–${e.score[1]}${e.ev.by ? ' · ' + esc(e.ev.by) : ''}${e.note ? ' · ' + esc(e.note) : ''}</span></span>
       ${e.ev.t === 'point' || (e.ev.t === 'action' && OUTS[e.ev.skill].length > 1) ? `<button class="back" style="width:40px;height:40px;background:var(--bg)" data-a="editEv" data-v="${e.ev.id}" aria-label="Editar">${icon('edit', 18)}</button>` : ''}
       ${e.i > 0 ? `<button class="back" style="width:40px;height:40px;background:var(--bg)" data-a="delEv" data-v="${e.ev.id}" aria-label="Borrar">${icon('trash', 18)}</button>` : ''}</div>`).join('')}</div>`;
@@ -918,14 +1025,22 @@ function sheetHtml() {
         <span class="eyebrow" style="margin-top:6px">+1 ${esc(m.opponent)}</span>${pointGrid('them', 'setPoint', `${ev.cause}|${ev.kind}`)}`;
     else inner = `<h3>${esc(describe(ev, m))}</h3><p class="muted">Elige el resultado correcto. El marcador se recalcula.</p><div class="grid2">${OUTS[ev.skill].map(([v, l, cls]) => `<button class="act ${cls}" data-a="setOut" data-v="${v}">${l}</button>`).join('')}</div>`;
   } else if (s.kind === 'sub') {
-    if (!s.out) {
-      inner = `<h3>Cambio · ¿quién sale?</h3><p class="muted">${st.subs} de 6 cambios usados en este set.</p><div class="grid3">${ct.filter((id) => !P(id).lib).map((id) => `<button class="act neu" data-a="subOut" data-v="${id}">#${P(id).n} ${esc(first(id))}</button>`).join('')}</div>`;
+    inner = `<h3>Cambio · ¿quién sale?</h3><p class="muted">También puedes tocar directamente a la jugadora en la pista.</p><div class="grid3">${ct.map((id) => `<button class="act neu" data-a="courtTap" data-v="${id}">#${P(id).n} ${esc(first(id))}</button>`).join('')}</div>`;
+  } else if (s.kind === 'court') {
+    const id = s.id;
+    if (st.libero && st.libero.id === id) {
+      inner = `<h3>#${P(id).n} ${esc(first(id))} · líbero</h3><p class="muted">Está jugando por ${esc(first(st.libero.replaced))}.</p><button class="btn secondary wide" data-a="liberoOut">Vuelve ${esc(first(st.libero.replaced))}</button>`;
     } else {
-      const bench = roster().filter((p) => !p.lib && !st.rot.includes(p.id));
-      inner = `<h3>Sale ${esc(first(s.out))} · ¿quién entra?</h3><div class="grid3">${bench.map((p) => `<button class="act neu" data-a="subIn" data-v="${p.id}">#${p.n} ${esc(first(p.id))}</button>`).join('')}</div>`;
+      const onCourt = new Set([...st.rot, ...(st.libero ? [st.libero.id] : [])]);
+      const bench = roster().filter((p) => !onCourt.has(p.id)).sort((a, b) => a.n - b.n);
+      const mates = ct.filter((x) => x !== id && !(st.libero && x === st.libero.id));
+      inner = `<h3>Sale #${P(id).n} ${esc(first(id))} · ¿quién entra?</h3>
+        ${bench.length ? `<div class="grid3">${bench.map((p) => `<button class="act neu" data-a="subIn" data-v="${p.id}">#${p.n} ${esc(first(p.id))}</button>`).join('')}</div>` : '<p class="muted">No hay nadie en el banquillo.</p>'}
+        <div class="hr"></div><span class="grouplabel">O cámbiala de sitio con</span>
+        <div class="grid3">${mates.map((x) => `<button class="act" style="background:var(--raised)" data-a="swapWith" data-v="${x}">#${P(x).n} ${esc(first(x))}</button>`).join('')}</div>`;
     }
   } else if (s.kind === 'timeout') {
-    inner = `<h3>Tiempo muerto</h3><div class="grid2"><button class="act us" data-a="timeout" data-v="us" ${st.timeouts.us >= 2 ? 'disabled style="opacity:.4"' : ''}>Nuestro · ${st.timeouts.us}/2</button><button class="act them" data-a="timeout" data-v="them" ${st.timeouts.them >= 2 ? 'disabled style="opacity:.4"' : ''}>Del rival · ${st.timeouts.them}/2</button></div>`;
+    inner = `<h3>Tiempo muerto</h3><div class="grid2"><button class="act us" data-a="timeout" data-v="us">Nuestro${st.timeouts.us ? ` · ${st.timeouts.us}` : ''}</button><button class="act them" data-a="timeout" data-v="them">Del rival${st.timeouts.them ? ` · ${st.timeouts.them}` : ''}</button></div>`;
   } else if (s.kind === 'libero') {
     if (st.libero) inner = `<h3>Líbero en pista</h3><p class="muted">${esc(first(st.libero.id))} está jugando por ${esc(first(st.libero.replaced))}. Sale sola cuando ${esc(first(st.libero.replaced))} rota a la delantera.</p><button class="btn secondary wide" data-a="liberoOut">Vuelve ${esc(first(st.libero.replaced))}</button>`;
     else if (!st.liberoIds.length) inner = '<h3>Sin líbero</h3><p class="muted">No elegiste líbero al preparar el partido.</p>';
@@ -935,7 +1050,7 @@ function sheetHtml() {
     }
   } else if (s.kind === 'pickZone') {
     const w = s.target === 'next' ? ui.nextSet : ui.wiz; const used = w.lineup.filter((id, k) => id && k !== s.zone);
-    const avail = roster().filter((p) => !p.lib && !used.includes(p.id)).sort((a, b) => a.n - b.n);
+    const avail = roster().filter((p) => !used.includes(p.id)).sort((a, b) => a.n - b.n);
     inner = `<h3>Zona ${[1, 2, 3, 4, 5, 6][s.zone]}</h3><div class="grid3">${avail.map((p) => `<button class="act ${w.lineup[s.zone] === p.id ? 'us' : 'neu'}" data-a="wizPick" data-v="${p.id}">#${p.n}<br>${esc(first(p.id))}</button>`).join('')}</div>`;
   } else if (s.kind === 'player') {
     const f = ui.form;
@@ -955,6 +1070,11 @@ function sheetHtml() {
       <p class="muted" style="font-size:14px;text-align:center">Mantén pulsada la imagen → <b>Guardar en Fotos</b> o <b>Compartir</b>.</p>
       <div class="grid2"><button class="btn primary" style="font-size:16px" data-a="shareNative">${icon('share', 18)} Compartir</button><button class="btn secondary" data-a="copyText">Copiar texto</button></div>
       ${sh.showText ? `<textarea class="input" readonly style="user-select:text;-webkit-user-select:text">${esc(sh.text)}</textarea>` : ''}`;
+  } else if (s.kind === 'merge') {
+    const others = DB.matches.filter((x) => x.id !== m.id && x.events.length).sort((a, b) => (b.date + b.id).localeCompare(a.date + a.id));
+    inner = `<h3>Unir con otro partido</h3>
+      <p class="muted">Para un partido que se apuntó en dos partes. Elige la <b>primera parte</b>: los sets de este (vs. ${esc(m.opponent)}, ${resultLine(m).sets}) se añaden detrás y este desaparece.</p>
+      <div class="list">${others.map((x) => { const r = resultLine(x); return `<button class="item" data-a="mergeInto" data-v="${x.id}"><span class="chip ${r.chip}">${r.letter} ${r.st.setsUs}–${r.st.setsThem}</span><span class="grow"><span class="name" style="display:block">vs. ${esc(x.opponent)}</span><span class="sub">${fmtDate(x.date)} · ${r.sets}</span></span></button>`; }).join('')}</div>`;
   } else if (s.kind === 'wipe') {
     inner = `<h3>¿Borrar todo y empezar de cero?</h3><p class="muted">Se borran el equipo, la plantilla y todos los partidos${SHARED ? ' para todo el equipo, en todos los móviles' : ''}. No se puede deshacer.</p>
       <button class="btn primary" style="background:var(--red)" data-a="wipe">Sí, borrar todo</button>`;
@@ -962,6 +1082,9 @@ function sheetHtml() {
     const dm = cur();
     inner = `<h3>¿Borrar el partido contra ${esc(dm ? dm.opponent : '')}?</h3><p class="muted">Se pierden todas sus jugadas y estadísticas. No se puede deshacer.</p>
       <button class="btn primary" style="background:var(--red)" data-a="discardMatch">Sí, borrar partido</button>`;
+  } else if (s.kind === 'delPlan') {
+    inner = `<h3>¿Borrar el partido contra ${esc(ui.wiz ? ui.wiz.opponent : '')}?</h3><p class="muted">Se borra para todo el equipo.</p>
+      <button class="btn primary" style="background:var(--red)" data-a="delPlanYes">Sí, borrar partido</button>`;
   } else if (s.kind === 'backup') {
     const f = ui.form || {};
     inner = `${sync.state === 'error' && sync.error ? `<p class="err" style="user-select:text;-webkit-user-select:text">Error al sincronizar: ${esc(sync.error)}</p>` : ''}<h3>Copia de seguridad</h3><p class="muted">Los datos se guardan solo en este móvil. Al acabar cada partido, envíate una copia (por WhatsApp o correo) por si acaso.</p>
@@ -972,25 +1095,42 @@ function sheetHtml() {
       <div class="card dark" style="gap:8px;margin-top:6px"><b>Empezar de cero</b><p class="muted" style="font-size:14px">Borra el equipo, la plantilla y todos los partidos${SHARED ? ' en todos los móviles' : ''}.</p>
         <button class="btn ghost wide" style="color:var(--red-s)" data-a="sheet" data-v="wipe">Borrar todo</button></div>`;
   } else if (s.kind === 'whoami') {
-    inner = `<h3>¿Cómo te llamas?</h3><p class="muted">Así se verá quién apunta cada jugada. Se guarda solo en este móvil.</p>
-      <div class="field"><label for="mename">Tu nombre</label><input id="mename" class="input" data-form="me" value="${esc((ui.form && ui.form.me) || '')}" placeholder="p. ej. Vic" autocomplete="off"></div>
-      <button class="btn primary" data-a="saveName">Guardar</button>`;
+    const ps = roster().sort((a, b) => a.n - b.n);
+    inner = `<h3>¿Quién eres?</h3><p class="muted">Así se ve quién apunta cada jugada. Si os turnáis, cámbialo cuando le pases el móvil a otra.</p>
+      <div class="who">${ps.map((p) => `<button class="act neu ${meId === p.id ? 'on' : ''}" data-a="pickMe" data-v="${p.id}">#${p.n}<br>${esc(first(p.id))}</button>`).join('')}</div>
+      <button class="act ${meId === 'coach' ? 'us' : 'neu'}" style="width:100%" data-a="pickMe" data-v="coach">Entrenadora${DB.coach ? ` · ${esc(DB.coach)}` : ''}</button>`;
+  } else if (s.kind === 'coach') {
+    inner = `<h3>Entrenadora</h3><p class="muted">Puede apuntar partidos como cualquiera, pero no sale en la alineación ni en las estadísticas.</p>
+      <div class="field"><label for="cname">Nombre</label><input id="cname" class="input" data-form="coach" value="${esc((ui.form && ui.form.coach) || '')}" placeholder="p. ej. Marta" autocomplete="off"></div>
+      ${ui.form && ui.form.err ? `<p class="err">${ui.form.err}</p>` : ''}<button class="btn primary" data-a="saveCoach">Guardar</button>`;
+  } else if (s.kind === 'rules') {
+    const r = ui.rules; const set = st.sets[st.sets.length - 1];
+    inner = `<h3>Set ${st.setNo} · ${set.us}–${set.them}</h3><p class="muted">Los cambios valen para este set y los siguientes.</p>${rulesFields(r, 'rules')}
+      <button class="btn primary" data-a="saveRules">Guardar</button>
+      <div class="hr"></div>
+      ${st.needSetStart ? '' : `<button class="btn secondary wide" data-a="endSet">Terminar el set aquí${set.us !== set.them ? ` (${set.us > set.them ? 'para nosotras' : `para ${esc(m.opponent)}`})` : ' (empate)'}</button>`}
+      <button class="btn ghost wide" data-a="endMatch">Terminar el partido</button>
+      ${SHARED ? `<button class="link" data-a="editName">Apunta ${me ? esc(me) : 'nadie'} · cambiar</button>` : ''}`;
   } else if (s.kind === 'nextSet') {
     const n = ui.nextSet;
     inner = `<h3>Set ${replay(cur()).setNo + 1}</h3><p class="muted">Toca una zona para cambiar quién empieza ahí.</p>${zonesHtml(n.lineup, n.first === 'us', 'next')}
       <div class="pills"><button class="pill ${n.first === 'us' ? 'on' : ''}" data-a="nextFirst" data-v="us">Sacamos</button><button class="pill ${n.first === 'them' ? 'on' : ''}" data-a="nextFirst" data-v="them">Saca el rival</button></div>
+      ${rulesFields(n, 'next')}
       <button class="btn primary" data-a="startSet">Empezar set</button>`;
   }
-  if (s.kind === 'history') inner += `${st && !st.finished && st.setNo ? '<button class="btn secondary wide" data-a="endMatch">Terminar el partido aquí</button>' : ''}<button class="btn ghost wide" style="color:var(--red-s)" data-a="sheet" data-v="discard">Descartar este partido</button>`;
+  if (s.kind === 'history') inner += `<button class="btn ghost wide" style="color:var(--red-s)" data-a="sheet" data-v="discard">Descartar este partido</button>`;
   return `<div class="scrim" data-a="closeSheet"><div class="sheet" role="dialog" aria-modal="true" data-stop="1"><div class="grab"></div>${inner}<button class="btn ghost wide" data-a="closeSheet">Cerrar</button></div></div>`;
 }
 function describe(ev, m) {
-  if (ev.t === 'set_start') return `Empieza el set · saca ${ev.firstServer === 'us' ? 'nuestro equipo' : m.opponent}`;
+  if (ev.t === 'set_start') return `Empieza el set${ev.target ? ` a ${ev.target}` : ''} · saca ${ev.firstServer === 'us' ? 'nuestro equipo' : m.opponent}`;
   if (ev.t === 'action') return `#${P(ev.pid).n} ${first(ev.pid)} · ${SKILL[ev.skill]} · ${outLabel(ev.skill, ev.out)}`;
   if (ev.t === 'point') return CAUSE_ONE[ev.cause] + (ev.kind ? ` · ${KIND_LABEL[ev.kind] || ''}` : '');
   if (ev.t === 'sub') return `Cambio: entra ${first(ev.in)} por ${first(ev.out)}`;
   if (ev.t === 'libero') return ev.dir === 'in' ? `Líbero: entra ${first(ev.lid)} por ${first(ev.pid)}` : 'Líbero: sale';
   if (ev.t === 'end') return 'Partido terminado aquí';
+  if (ev.t === 'swap') return `${first(ev.a)} y ${first(ev.b)} cambian de sitio`;
+  if (ev.t === 'set_end') return 'Set terminado a mano';
+  if (ev.t === 'rules') return ev.target ? `Reglas: ${rulesText({ bestOf: ev.bestOf, target: ev.target, by2: ev.by2 })}` : `Ahora: ${ev.bestOf ? `mejor de ${ev.bestOf}` : 'sets sin límite'}`;
   if (ev.t === 'timeout') return `Tiempo muerto ${ev.side === 'us' ? 'nuestro' : 'del rival'}`;
   return '';
 }
@@ -1005,10 +1145,18 @@ function record(ev, msg) {
   ui.sel = null;
   const scored = after.points.length > before.points.length;
   vibrate(scored ? 22 : 10);
-  if (after.finished) { vibrate([30, 60, 30]); toast('Partido terminado'); }
-  else if (after.needSetStart && !before.needSetStart) toast(`Fin del set ${after.setNo}`);
+  if (after.finished && !before.finished) { vibrate([30, 60, 30]); toast('Partido terminado'); }
+  else if (after.needSetStart && !before.needSetStart && after.setNo === before.setNo && after.sets.length && after.sets[after.sets.length - 1].closed && !before.sets[before.sets.length - 1].closed) toast(`Fin del set ${after.setNo}`);
   else { const note = after.log[after.log.length - 1].note; toast(note || msg); }
   render();
+}
+function openPlan(id, step) {
+  const m = matchById(id); if (!m) return;
+  const ids = new Set(roster().map((p) => p.id)); const pl = m.plan || {};
+  const lineup = Array.from({ length: 6 }, (_, i) => (pl.lineup && ids.has(pl.lineup[i]) ? pl.lineup[i] : null));
+  ui.wiz = { id, step, opponent: m.opponent, date: m.date, time: m.time || '', place: m.place || '', bestOf: m.bestOf || 0, target: m.target || 25, by2: m.by2 !== false,
+    lineup, libero: pl.liberoIds && ids.has(pl.liberoIds[0]) ? pl.liberoIds[0] : '', first: pl.firstServer || 'us' };
+  go({ name: 'new' });
 }
 const H = {
   tab: (v) => { stack.length = 0; route = { name: v }; ui.sheet = null; render(true); },
@@ -1017,15 +1165,23 @@ const H = {
   openLive: () => go({ name: 'live', id: liveMatch().id }),
   leaveLive: () => { ui.sel = null; back(); },
   newMatch: () => {
-    const field = roster().filter((p) => !p.lib).sort((a, b) => a.n - b.n);
+    const field = roster().slice().sort((a, b) => (a.lib - b.lib) || a.n - b.n);
     if (field.length < 6) { toast('Primero añade al menos 6 jugadoras en Equipo'); return; }
     const prev = DB.matches.slice().sort((a, b) => b.date.localeCompare(a.date))[0];
     const ok = (ids) => ids && ids.length === 6 && ids.every((id) => field.some((p) => p.id === id));
-    const lineup = prev && ok(prev.events[0].lineup) ? [...prev.events[0].lineup] : field.slice(0, 6).map((p) => p.id);
-    const lib = roster().find((p) => p.lib);
-    ui.wiz = { step: 1, opponent: '', date: today(), bestOf: 5, lineup, libero: lib ? lib.id : '', first: 'us' }; go({ name: 'new' });
+    const prevLineup = prev && (prev.events[0] ? prev.events[0].lineup : prev.plan && prev.plan.lineup);
+    const lineup = ok(prevLineup) ? [...prevLineup] : field.slice(0, 6).map((p) => p.id);
+    // Same rules as the last match: leagues usually play the same way every week.
+    const rules = prev && prev.target ? { bestOf: prev.bestOf || 0, target: prev.target, by2: prev.by2 !== false } : { bestOf: 3, target: 25, by2: true };
+    ui.wiz = { step: 1, opponent: '', date: today(), time: '', place: '', ...rules, lineup, libero: '', first: 'us' }; go({ name: 'new' });
   },
-  wizBest: (v) => { ui.wiz.bestOf = +v; render(); },
+  rule: (v) => {
+    const [scope, field, val] = v.split(':'); const d = scope === 'wiz' ? ui.wiz : scope === 'next' ? ui.nextSet : ui.rules; if (!d) return;
+    if (field === 'target') d.target = Math.max(1, Math.min(99, val[0] === '=' ? +val.slice(1) : d.target + +val));
+    else if (field === 'by2') d.by2 = val === 'true';
+    else if (field === 'bestOf') d.bestOf = +val;
+    render();
+  },
   wizNext: () => {
     const w = ui.wiz; w.err = '';
     if (w.step === 1 && !w.opponent.trim()) { w.err = 'Escribe el nombre del rival.'; return render(); }
@@ -1042,9 +1198,33 @@ const H = {
   wizLib: (v) => { ui.wiz.libero = v; render(); },
   wizFirst: (v) => { ui.wiz.first = v; render(); },
   wizStart: () => {
-    const w = ui.wiz; const m = newMatch(w.opponent.trim(), w.date, w.bestOf, [...w.lineup], w.libero ? [w.libero] : [], w.first);
-    commit({ t: 'match', m: { id: m.id, opponent: m.opponent, date: m.date, bestOf: m.bestOf } }, { t: 'ev_add', mid: m.id, eid: m.events[0].id, ev: m.events[0] });
+    const w = ui.wiz;
+    if (w.lineup.some((x) => !x)) { w.step = 2; w.err = 'Faltan zonas por completar.'; return render(true); }
+    const other = liveMatch(); if (other && other.id !== w.id) { toast('Termina antes el partido en directo'); return; }
+    const ex = w.id && matchById(w.id);
+    if (ex && ex.events.length) { stack.length = 0; route = { name: 'home' }; return go({ name: 'live', id: w.id }); }
+    const m = newMatch(w.opponent.trim(), w.date, w.bestOf, [...w.lineup], w.libero ? [w.libero] : [], w.first);
+    if (w.id) m.id = w.id; m.time = w.time || ''; m.place = (w.place || '').trim();
+    m.target = w.target; m.by2 = w.by2; Object.assign(m.events[0], { target: w.target, by2: w.by2 });
+    if (me) m.events[0].by = me;
+    commit({ t: 'match', m: matchMeta(m) }, { t: 'ev_add', mid: m.id, eid: m.events[0].id, ev: m.events[0] });
     stack.length = 0; route = { name: 'home' }; vibrate(20); go({ name: 'live', id: m.id });
+  },
+  wizSave: () => {
+    const w = ui.wiz; w.err = '';
+    if (!w.opponent.trim()) { w.step = 1; w.err = 'Escribe el nombre del rival.'; return render(true); }
+    const ex = w.id && matchById(w.id);
+    if (ex && ex.events.length) { toast('Ese partido ya ha empezado'); stack.length = 0; route = { name: 'home' }; return render(true); }
+    const m = { id: w.id || newId(), opponent: w.opponent.trim(), date: w.date, bestOf: w.bestOf, target: w.target, by2: w.by2, time: w.time || '', place: (w.place || '').trim(),
+      plan: { lineup: [...w.lineup], liberoIds: w.libero ? [w.libero] : [], firstServer: w.first } };
+    commit({ t: 'match', m: matchMeta(m) });
+    stack.length = 0; route = { name: 'home' }; ui.wiz = null; toast(`Guardado para el ${fmtDate(m.date)}${m.time ? ' a las ' + m.time : ''}`); render(true);
+  },
+  editPlan: (v) => openPlan(v, 1),
+  startPlan: (v) => { const m = matchById(v); if (m) openPlan(v, planReady(m) ? 3 : 2); },
+  delPlanYes: () => {
+    const w = ui.wiz; if (w && w.id) commit({ t: 'match_del', id: w.id });
+    ui.sheet = null; ui.wiz = null; stack.length = 0; route = { name: 'home' }; toast('Partido borrado'); render(true);
   },
   quick: (v) => { ui.sel = { quick: v }; vibrate(6); render(); },
   quickCause: (v) => { const [cause, kind] = v.split('|'); record({ t: 'point', cause, kind }, `${winnerOf(cause) === 'us' ? '+1 nosotras' : '+1 rival'} · ${CAUSE_ONE[cause]} · ${KIND_LABEL[kind]}`); },
@@ -1054,14 +1234,62 @@ const H = {
     const ev = m.events[m.events.length - 1]; commit({ t: 'ev_del', mid: m.id, eid: ev.id }); ui.sel = null; vibrate(8); toast(`Deshecho: ${describe(ev, m)}`); render();
   },
   startSet: () => {
-    const m = cur(); const st = replay(m); const ev = nextSetStart(m, st);
-    if (ui.sheet && ui.sheet.kind === 'nextSet') {
-      if (ui.nextSet.lineup.some((x) => !x)) { toast('Faltan zonas por completar'); return; }
-      ev.lineup = [...ui.nextSet.lineup]; ev.firstServer = ui.nextSet.first;
-    }
-    ev.id = newId(); if (me) ev.by = me; ui.sheet = null; commit({ t: 'ev_add', mid: m.id, eid: ev.id, ev }); vibrate(20); toast(`Empieza el set ${st.setNo + 1}`); render();
+    // Uses what was chosen in "Cambiar alineación…", even if that sheet was closed first.
+    const m = cur(); const st = replay(m); const ev = nextSetStart(m, st); const n = nextDraft(m, st);
+    if (n.lineup.some((x) => !x)) { toast('Faltan zonas por completar'); return; }
+    Object.assign(ev, { lineup: [...n.lineup], firstServer: n.first, target: n.target, by2: n.by2 });
+    if (n.bestOf !== st.bestOf) ev.bestOf = n.bestOf;
+    ev.id = newId(); if (me) ev.by = me; ui.sheet = null; ui.nextSet = null; commit({ t: 'ev_add', mid: m.id, eid: ev.id, ev }); vibrate(20); toast(`Empieza el set ${st.setNo + 1} · a ${n.target}`); render();
   },
-  nextSetEdit: () => { const m = cur(); const nx = nextSetStart(m, replay(m)); ui.nextSet = { lineup: [...nx.lineup], first: nx.firstServer }; ui.sheet = { kind: 'nextSet' }; render(); },
+  nextSetEdit: () => { nextDraft(cur(), replay(cur())); ui.sheet = { kind: 'nextSet' }; render(); },
+  openRules: () => {
+    const m = cur(); const st = replay(m); if (st.finished && st.endedEarly) return;
+    if (st.finished) { toast('El partido se ha cerrado por los sets: elige abajo cómo seguir'); return; }
+    if (st.needSetStart) return H.nextSetEdit();
+    ui.rules = { target: st.target, by2: st.by2, bestOf: st.bestOf }; ui.sheet = { kind: 'rules' }; render();
+  },
+  saveRules: () => {
+    const m = cur(); const st = replay(m); const r = ui.rules; ui.sheet = null;
+    if (r.target === st.target && r.by2 === st.by2 && r.bestOf === st.bestOf) return render();
+    record({ t: 'rules', target: r.target, by2: r.by2, bestOf: r.bestOf }, rulesText(r));
+  },
+  extendMatch: (v) => {
+    // Re-opens a match that closed itself because of its set count.
+    const m = cur(); if (!m) return; const bestOf = +v; const label = bestOf ? `Ahora a mejor de ${bestOf}` : 'Ahora sets sin límite';
+    ui.sheet = null; ui.nextSet = null;
+    record({ t: 'rules', bestOf }, label);
+    if (route.name !== 'live') { stack.length = 0; route = { name: 'home' }; go({ name: 'live', id: m.id }); }
+    toast(`${label}: ya puedes empezar el siguiente set`);
+  },
+  mergeInto: (v) => {
+    // The match on screen is the second part: its events go after those of the chosen first part.
+    const src = cur(); const dst = matchById(v); if (!src || !dst || src.id === dst.id) return;
+    const ops = [{ t: 'match', m: { ...matchMeta(dst), bestOf: 0 } }];
+    for (const e of dst.events) if (e.t === 'end') ops.push({ t: 'ev_del', mid: dst.id, eid: e.id });
+    for (const e of src.events) { if (e.t === 'end') continue; const ev = { ...e, id: newId() }; ops.push({ t: 'ev_add', mid: dst.id, eid: ev.id, ev }); }
+    const end = { id: newId(), t: 'end' }; if (me) end.by = me;
+    ops.push({ t: 'ev_add', mid: dst.id, eid: end.id, ev: end }, { t: 'match_del', id: src.id });
+    commit(...ops);
+    const r = resultLine(matchById(dst.id));
+    ui.sheet = null; stack.length = 0; route = { name: 'home' }; go({ name: 'summary', id: dst.id }); toast(`Partidos unidos: ${r.text}`);
+  },
+  endSet: () => { ui.sheet = null; record({ t: 'set_end' }, 'Set terminado'); },
+  courtTap: (v) => { ui.sel = null; ui.sheet = { kind: 'court', id: v }; render(); },
+  swapWith: (v) => { const a = ui.sheet.id; ui.sheet = null; record({ t: 'swap', a, b: v }, `${first(a)} y ${first(v)} cambian de sitio`); },
+  editCoach: () => { ui.form = { coach: DB.coach || '', err: '' }; ui.sheet = { kind: 'coach' }; render(); },
+  saveCoach: () => {
+    const n = ((ui.form && ui.form.coach) || '').trim(); if (!n) { ui.form.err = 'Escribe un nombre.'; return render(); }
+    commit({ t: 'coach', name: n });
+    if (meId === 'coach') { me = n; store.set('volapp-name', me); }
+    const pick = ui.form.pick; ui.form = null; ui.sheet = null;
+    if (pick) return H.pickMe('coach');
+    toast('Entrenadora guardada'); render();
+  },
+  pickMe: (v) => {
+    if (v === 'coach' && !DB.coach) { ui.form = { coach: '', err: '', pick: true }; ui.sheet = { kind: 'coach' }; return render(); }
+    meId = v; me = v === 'coach' ? DB.coach : P(v).name;
+    store.set('volapp-me', meId); store.set('volapp-name', me); ui.sheet = null; toast(`Apunta ${me}`); render();
+  },
   nextFirst: (v) => { ui.nextSet.first = v; render(); },
   editTeam: () => { ui.form = { team: DB.team, err: '' }; ui.sheet = { kind: 'team' }; render(); },
   saveTeam: () => {
@@ -1116,11 +1344,9 @@ const H = {
     const m = cur(); if (!m) return; const ev = { id: newId(), t: 'end' }; if (me) ev.by = me;
     ui.sheet = null; ui.sel = null; commit({ t: 'ev_add', mid: m.id, eid: ev.id, ev }); vibrate([30, 60, 30]); toast('Partido terminado'); render();
   },
-  saveName: () => { me = ((ui.form && ui.form.me) || '').trim(); store.set('volapp-name', me); ui.sheet = null; ui.form = null; if (me) toast(`Hola, ${me}`); render(); },
-  editName: () => { ui.form = { me }; ui.sheet = { kind: 'whoami' }; render(); },
+  editName: () => { ui.sheet = { kind: 'whoami' }; render(); },
   retry: () => { setSync('connecting'); render(); flush(); },
-  subOut: (v) => { const st = replay(cur()); if (st.subs >= 6) { toast('Ya no quedan cambios en este set'); return; } ui.sheet = { kind: 'sub', out: v }; render(); },
-  subIn: (v) => { const out = ui.sheet.out; ui.sheet = null; record({ t: 'sub', out, in: v }, `Entra ${first(v)} por ${first(out)}`); },
+  subIn: (v) => { const out = ui.sheet.id; ui.sheet = null; record({ t: 'sub', out, in: v }, `Entra ${first(v)} por ${first(out)}`); },
   timeout: (v) => { ui.sheet = null; record({ t: 'timeout', side: v }, `Tiempo muerto ${v === 'us' ? 'nuestro' : 'del rival'}`); },
   liberoIn: (v) => { const st = replay(cur()); ui.sheet = null; record({ t: 'libero', dir: 'in', lid: st.liberoIds[0], pid: v }, `Entra ${first(st.liberoIds[0])} por ${first(v)}`); },
   liberoOut: () => { ui.sheet = null; record({ t: 'libero', dir: 'out' }, 'Sale la líbero'); },
@@ -1182,7 +1408,8 @@ function render(scrollTop) {
   if (scrollTop) window.scrollTo(0, 0);
   keepAwake(route.name === 'live');
   if (!sync.timer) schedule();
-  if (SHARED && sync.loaded && DB.team && !me && !ui.sheet && !ui.askedName) { ui.askedName = true; ui.form = { me: '' }; ui.sheet = { kind: 'whoami' }; render(); }
+  // Ask who's recording once there's someone to pick (also after the name-only version).
+  if (SHARED && sync.loaded && DB.team && !meId && roster().length && !ui.sheet && !ui.askedName) { ui.askedName = true; ui.sheet = { kind: 'whoami' }; render(); }
 }
 let wakeLock = null;
 async function keepAwake(on) {
