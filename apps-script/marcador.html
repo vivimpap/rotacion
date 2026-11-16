@@ -1,0 +1,104 @@
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap">
+<style>
+/* Public scoreboard: one match, read only, made to be read from the stands. */
+:root {
+  --bg: #2A2925; --raised: #35342F; --line: #46443E; --cream: #F3F0DC; --sage: #D8DBC3;
+  --orange: #EB6E3A; --green: #6F9A5C; --red: #C25A4A; --green-s: #A9C391; --red-s: #E1A194;
+  --tx: #F3F0DC; --tx-m: rgba(243,240,220,.62); --ink: #2A2925;
+  --display: 'Space Grotesk', ui-sans-serif, system-ui, sans-serif;
+  --body: 'Inter Tight', ui-sans-serif, system-ui, sans-serif;
+  color-scheme: dark;
+}
+html, body { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--tx); font-family: var(--body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+* { box-sizing: border-box; }
+.wrap { max-width: 520px; margin: 0 auto; min-height: 100%; display: flex; flex-direction: column; gap: 16px; padding-block: 20px; }
+.eyebrow { font-size: 12px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--tx-m); }
+.status { font-family: var(--display); font-size: 22px; font-weight: 600; }
+.board { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.team { border-radius: 28px; padding: 14px 10px 16px; display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 0; background: var(--raised); border: 2px solid var(--line); }
+.team.us { background: rgba(235,110,58,.16); border-color: rgba(235,110,58,.55); }
+.team .name { font-size: 13px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--tx-m); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.team.serving .name { color: var(--orange); }
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 5px; background: var(--orange); margin-right: 6px; vertical-align: middle; }
+.pts { font-family: var(--display); font-weight: 700; font-size: min(30vw, 150px); line-height: .95; letter-spacing: -4px; font-variant-numeric: tabular-nums; }
+.bump { animation: bump .4s ease-out; }
+@keyframes bump { 40% { transform: scale(1.12); color: var(--orange); } }
+.sets { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { display: inline-flex; align-items: center; min-height: 32px; padding: 0 14px; border-radius: 999px; font-family: var(--display); font-weight: 700; font-size: 16px; color: var(--ink); background: var(--sage); }
+.chip.win { background: var(--green); } .chip.loss { background: var(--red); }
+.card { background: var(--raised); border-radius: 28px; padding: 18px; display: flex; flex-direction: column; gap: 10px; }
+.big { font-family: var(--display); font-size: 34px; font-weight: 700; line-height: 1.1; }
+.muted { color: var(--tx-m); }
+.foot { margin-top: auto; display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: var(--tx-m); }
+.brand { font-family: var(--display); font-weight: 700; color: var(--tx); display: flex; align-items: center; gap: 8px; }
+.brand i { width: 12px; height: 12px; border-radius: 6px; background: var(--orange); display: block; }
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
+</style>
+
+<div class="wrap" id="app"><p class="muted">Cargando el marcador…</p></div>
+
+<script>
+'use strict';
+const MATCH = '__MATCH_ID__';
+const MONTHS = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
+const fmtDate = (d) => { const [, m, dd] = String(d).split('-'); return m ? `${+dd} ${MONTHS[+m - 1]}` : ''; };
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const app = document.getElementById('app');
+let last = null; let lastScore = null; let failed = 0;
+
+function ago(t) {
+  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (s < 60) return `hace ${s} s`;
+  const mn = Math.round(s / 60); if (mn < 60) return `hace ${mn} min`;
+  return `hace ${Math.round(mn / 60)} h`;
+}
+function render() {
+  const d = last;
+  const foot = `<div class="foot"><span class="brand"><i></i>VolApp</span><span>${d && d.at ? `Actualizado ${ago(d.at)}` : ''}${failed > 2 ? ' · sin conexión' : ''}</span></div>`;
+  if (!d) {
+    app.innerHTML = `<span class="eyebrow">Marcador en directo</span><div class="card"><p class="big">Este partido aún no tiene marcador</p><p class="muted">Aparecerá aquí en cuanto empiece. No hace falta recargar.</p></div>${foot}`;
+    return;
+  }
+  const when = [fmtDate(d.date), d.time].filter(Boolean).join(' · ');
+  if (d.status === 'planned') {
+    app.innerHTML = `<span class="eyebrow">Marcador en directo${when ? ` · ${esc(when)}` : ''}</span>
+      <div class="card"><p class="big">${esc(d.team)}<br><span class="muted">vs.</span> ${esc(d.opponent)}</p>
+      <p class="muted">Empieza ${when ? `el ${esc(when)}` : 'pronto'}${d.place ? ` en ${esc(d.place)}` : ''}. El marcador aparecerá aquí en cuanto empiece, sin recargar.</p></div>${foot}`;
+    return;
+  }
+  const sets = d.sets || []; const cur = sets[sets.length - 1] || [0, 0, ''];
+  const live = d.status === 'live';
+  const us = live ? cur[0] : d.setsUs, them = live ? cur[1] : d.setsThem;
+  const bumpUs = lastScore && live && lastScore[0] !== cur[0], bumpThem = lastScore && live && lastScore[1] !== cur[1];
+  lastScore = live ? [cur[0], cur[1]] : null;
+  const won = d.setsUs > d.setsThem ? d.team : d.setsThem > d.setsUs ? d.opponent : '';
+  const status = d.status === 'finished' ? `Final${won ? ` · gana ${esc(won)}` : ' · empate'}`
+    : d.status === 'break' ? `Descanso · set ${d.setNo} para ${esc(cur[2] === 'us' ? d.team : cur[2] === 'them' ? d.opponent : 'nadie')}`
+    : `Set ${d.setNo} · saca ${esc(d.serving === 'us' ? d.team : d.opponent)}`;
+  const team = (side, name, n, bump) => `<div class="team ${side} ${live && d.serving === side ? 'serving' : ''}"><span class="name">${live && d.serving === side ? '<span class="dot"></span>' : ''}${esc(name)}</span><span class="pts ${bump ? 'bump' : ''}">${n}</span></div>`;
+  app.innerHTML = `<span class="eyebrow">Marcador en directo${when ? ` · ${esc(when)}` : ''}</span>
+    <p class="status">${status}</p>
+    <div class="board">${team('us', d.team, us, bumpUs)}${team('them', d.opponent, them, bumpThem)}</div>
+    <p class="muted" style="margin:0;text-align:center">${live ? `Puntos del set ${d.setNo} · sets ${d.setsUs}–${d.setsThem}` : 'Sets ganados'}</p>
+    ${sets.length ? `<div class="card"><span class="eyebrow">Sets</span><div class="sets">${sets.map((s, i) => `<span class="chip ${s[2] === 'us' ? 'win' : s[2] === 'them' ? 'loss' : ''}">${i + 1}º · ${s[0]}–${s[1]}</span>`).join('')}</div></div>` : ''}
+    ${d.place ? `<p class="muted" style="margin:0;font-size:14px">${esc(d.place)}</p>` : ''}
+    ${foot}`;
+}
+function load() {
+  if (document.visibilityState !== 'visible') return;
+  google.script.run
+    .withSuccessHandler((d) => { failed = 0; last = d; render(); })
+    .withFailureHandler(() => { failed++; render(); })
+    .marcador(MATCH);
+}
+load();
+setInterval(load, 4000);
+setInterval(render, 15000);
+document.addEventListener('visibilitychange', load);
+// Keep the phone awake while someone follows the match.
+(async () => { try { if (navigator.wakeLock) await navigator.wakeLock.request('screen'); } catch (e) { /* not available */ } })();
+</script>

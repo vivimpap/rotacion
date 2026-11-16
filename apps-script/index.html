@@ -473,6 +473,8 @@ const attEff = (ps) => (ps.att.n ? (ps.att.kill - ps.att.err - ps.att.blk) / ps.
 // log. Inside Google Apps Script the log is shared through a spreadsheet, so
 // several phones can record at the same time. Elsewhere it stays on this phone.
 const SHARED = !!(window.google && google.script && google.script.run);
+// Filled in by the server when it serves the team app; the public scoreboard page never gets it.
+const TEAM_KEY = '__VOLAPP_KEY__';
 const KEYS = SHARED ? { log: 'volapp-shared-log', ver: 'volapp-shared-ver', pending: 'volapp-shared-pending', gen: 'volapp-shared-gen' } : { log: 'volapp-log', ver: 'volapp-log-ver', pending: 'volapp-pending', gen: 'volapp-gen' };
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } },
@@ -485,7 +487,7 @@ let acked = [];                         // sent and confirmed, not yet pulled ba
 let gen = store.get(KEYS.gen, '');      // which data set the log belongs to; changes when it is wiped
 let me = store.get('volapp-name', '');     // name shown on what this phone records
 let meId = store.get('volapp-me', '');      // player id, or 'coach'
-const sync = { error: '', state: SHARED ? 'connecting' : 'local', loaded: !SHARED || log.length > 0, inflight: null, timer: null };
+const sync = { boards: {}, error: '', state: SHARED ? 'connecting' : 'local', loaded: !SHARED || log.length > 0, inflight: null, timer: null };
 const newId = () => uid() + uid();
 
 function opsFromDb(db) {
@@ -528,11 +530,22 @@ function rebuild() {
 // Data saved by the first single-phone version.
 if (!SHARED && !log.length) { const old = store.get('volapp-v1', null); if (old && old.team) { log = opsFromDb(old); store.set(KEYS.log, log); } }
 
+/** What the public scoreboard page shows for a match: no players, no stats. */
+function scoreBoard(m) {
+  if (!m) return null;
+  const base = { team: DB.team, opponent: m.opponent, date: m.date, time: m.time || '', place: m.place || '', at: Date.now() };
+  if (!m.events.length) return { ...base, status: 'planned' };
+  const st = replay(m);
+  return { ...base, status: st.finished ? 'finished' : st.needSetStart ? 'break' : 'live', sets: st.sets.map((x) => [x.us, x.them, x.winner || '']),
+    setNo: st.setNo, setsUs: st.setsUs, setsThem: st.setsThem, serving: st.serving };
+}
 function commit(...ops) {
   for (const o of ops) { o.cid = newId(); o.at = Date.now(); if (me) o.by = me; }
-  if (SHARED) { pending.push(...ops); store.set(KEYS.pending, pending); flush(); }
-  else { log.push(...ops); store.set(KEYS.log, log); }
-  rebuild();
+  if (SHARED) {
+    pending.push(...ops); store.set(KEYS.pending, pending); rebuild();
+    for (const o of ops) { const id = o.mid || (o.m && o.m.id) || (o.t === 'match_del' && o.id); if (id) sync.boards[id] = scoreBoard(matchById(id)); }
+    flush();
+  } else { log.push(...ops); store.set(KEYS.log, log); rebuild(); }
 }
 function call(fn, ...args) {
   return new Promise((resolve, reject) => google.script.run.withSuccessHandler(resolve).withFailureHandler(reject)[fn](...args));
@@ -564,13 +577,17 @@ function flush() {
       for (let guard = 0; guard < 100; guard++) {
         const batch = pending.slice(0, 200);
         if (batch.length) setSync('saving');
-        const r = batch.length ? await call('push', batch, ver, gen) : await call('pull', ver);
+        const r = batch.length ? await call('push', TEAM_KEY, batch, ver, gen) : await call('pull', TEAM_KEY, ver);
         if (batch.length) {
           const sent = new Set(batch.map((o) => o.cid));
           acked.push(...batch); pending = pending.filter((o) => !sent.has(o.cid)); store.set(KEYS.pending, pending);
         }
         changed = applyRemote(r) || changed;
         if (!r.more && !r.reset && !r.regen && !pending.length) break;
+      }
+      if (Object.keys(sync.boards).length) {
+        const boards = sync.boards; sync.boards = {};
+        try { await call('publicar', TEAM_KEY, boards); } catch (e) { sync.boards = { ...boards, ...sync.boards }; }
       }
       sync.loaded = true; sync.error = ''; setSync('ok');
     } catch (e) {
@@ -708,7 +725,8 @@ function homeScreen() {
       <div class="row between"><span class="eyebrow">${fmtDate(m.date)}${m.time ? ` · ${esc(m.time)}` : ''}</span><span class="chip ${ready ? '' : 'quiet'}">${ready ? '6 inicial lista' : 'Sin 6 inicial'}</span></div>
       <h3>vs. ${esc(m.opponent)}</h3>
       ${m.place ? `<a href="${mapsUrl(m.place)}" target="_blank" rel="noopener" style="color:var(--tx-m);font-size:14px;text-underline-offset:3px">${esc(m.place)} · ver en Maps</a>` : ''}
-      <div class="grid2"><button class="btn ghost" data-a="editPlan" data-v="${m.id}">Editar</button>${live ? '<span></span>' : `<button class="btn primary" style="font-size:16px" data-a="startPlan" data-v="${m.id}">Empezar</button>`}</div></div>`; }).join('')}</div>` : ''}
+      <div class="grid2"><button class="btn ghost" data-a="editPlan" data-v="${m.id}">Editar</button>${live ? '<span></span>' : `<button class="btn primary" style="font-size:16px" data-a="startPlan" data-v="${m.id}">Empezar</button>`}</div>
+      ${SHARED ? `<button class="link" style="min-height:36px" data-a="guestLink" data-v="${m.id}">Enlace del marcador para el público</button>` : ''}</div>`; }).join('')}</div>` : ''}
     <div class="row between" style="margin-top:4px"><h3>Jugados</h3><span class="chip quiet">${past.length}</span></div>
     <div class="list">${past.length ? past.map((m) => { const r = resultLine(m); return `<button class="item" data-a="go" data-v="summary:${m.id}">
       <span class="chip ${r.chip}">${r.letter} ${r.st.setsUs}–${r.st.setsThem}</span>
@@ -927,6 +945,7 @@ function summaryScreen(id) {
     ${rotationCard(S, 'Rotaciones')}
 
     <button class="btn primary" data-a="share" data-v="${m.id}">${icon('share', 20)} Compartir resumen</button>
+    ${SHARED ? `<button class="link" data-a="guestLink" data-v="${m.id}">Enlace del marcador para el público</button>` : ''}
     ${more || others ? `<div class="card dark" style="gap:10px"><b>¿Faltan sets?</b>
       ${more ? `<p class="muted" style="font-size:14px">Si se jugaron más sets de los previstos, cambia el formato y sigue apuntando en este mismo partido.</p><div class="grid2">${more}</div>` : ''}
       ${others ? `<p class="muted" style="font-size:14px">Si el partido se apuntó en dos partes, júntalas en uno solo.</p><button class="btn ghost wide" data-a="sheet" data-v="merge">Unir con otro partido</button>` : ''}</div>` : ''}
@@ -1267,6 +1286,13 @@ function sheetHtml() {
       ${sh.imgs.map(([name, url], i) => `<span class="grouplabel">${i + 1}. ${name}</span><img src="${url}" alt="${name}" style="width:100%;border-radius:20px;display:block;-webkit-touch-callout:default">`).join('')}
       <div class="grid2"><button class="btn primary" style="font-size:16px" data-a="shareNative">${icon('share', 18)} Compartir todo</button><button class="btn secondary" data-a="copyText">Copiar texto</button></div>
       ${sh.showText ? `<textarea class="input" readonly style="user-select:text;-webkit-user-select:text">${esc(sh.text)}</textarea>` : ''}`;
+  } else if (s.kind === 'guest') {
+    const gm = matchById(s.mid);
+    inner = `<h3>Marcador para el público</h3>
+      <p class="muted">Quien abra este enlace verá <b>solo el marcador</b> de este partido (vs. ${esc(gm ? gm.opponent : '')}), en directo. Ni estadísticas, ni nombres, ni puede tocar nada.</p>
+      ${s.url ? `<div class="field"><label for="guesturl">Enlace</label><input id="guesturl" class="input" readonly value="${esc(s.url)}" style="font-size:14px"></div>
+      <div class="grid2"><button class="btn primary" style="font-size:16px" data-a="copyGuest">Copiar enlace</button><a class="btn secondary" style="text-decoration:none" href="https://wa.me/?text=${encodeURIComponent(`Marcador en directo de ${DB.team} vs. ${gm ? gm.opponent : ''}: ${s.url}`)}" target="_blank" rel="noopener">WhatsApp</a></div>`
+      : s.err ? `<p class="err">${esc(s.err)}</p>` : '<p class="muted">Preparando el enlace…</p>'}`;
   } else if (s.kind === 'how') {
     inner = `<h3>+1 ${s.side === 'us' ? 'Nosotras' : esc(m.opponent)} · ¿cómo?</h3>${pointGrid(s.side, 'quickCause')}`;
   } else if (s.kind === 'merge') {
@@ -1304,7 +1330,8 @@ function sheetHtml() {
       ${ui.form && ui.form.err ? `<p class="err">${ui.form.err}</p>` : ''}<button class="btn primary" data-a="saveCoach">Guardar</button>`;
   } else if (s.kind === 'rules') {
     const r = ui.rules; const set = st.sets[st.sets.length - 1];
-    inner = `<h3>Set ${st.setNo} · ${set.us}–${set.them}</h3><p class="muted">Los cambios valen para este set y los siguientes.</p>${rulesFields(r, 'rules')}
+    inner = `${SHARED ? `<button class="btn secondary wide" data-a="guestLink" data-v="${m.id}">Enlace del marcador para el público</button>` : ''}
+      <h3>Set ${st.setNo} · ${set.us}–${set.them}</h3><p class="muted">Los cambios valen para este set y los siguientes.</p>${rulesFields(r, 'rules')}
       <button class="btn primary" data-a="saveRules">Guardar</button>
       <div class="hr"></div>
       ${st.needSetStart ? '' : `<button class="btn secondary wide" data-a="endSet">Terminar el set aquí${set.us !== set.them ? ` (${set.us > set.them ? 'para nosotras' : `para ${esc(m.opponent)}`})` : ' (empate)'}</button>`}
@@ -1312,7 +1339,7 @@ function sheetHtml() {
       ${SHARED ? `<button class="link" data-a="editName">Apunta ${me ? esc(me) : 'nadie'} · cambiar</button>` : ''}`;
   } else if (s.kind === 'nextSet') {
     const n = ui.nextSet;
-    inner = `<h3>Set ${replay(cur()).setNo + 1}</h3><p class="muted">Toca una zona para cambiar quién empieza ahí.</p>${zonesHtml(n.lineup, n.first === 'us', 'next')}
+    inner = `${SHARED ? `<button class="btn secondary wide" data-a="guestLink" data-v="${cur().id}">Enlace del marcador para el público</button>` : ''}<h3>Set ${replay(cur()).setNo + 1}</h3><p class="muted">Toca una zona para cambiar quién empieza ahí.</p>${zonesHtml(n.lineup, n.first === 'us', 'next')}
       <div class="pills"><button class="pill ${n.first === 'us' ? 'on' : ''}" data-a="nextFirst" data-v="us">Sacamos</button><button class="pill ${n.first === 'them' ? 'on' : ''}" data-a="nextFirst" data-v="them">Saca el rival</button></div>
       ${rulesFields(n, 'next')}
       <button class="btn primary" data-a="startSet">Empezar set</button>`;
@@ -1534,7 +1561,7 @@ const H = {
   wipe: async () => {
     ui.sheet = null; ui.sel = null; stack.length = 0; route = { name: 'home' };
     if (SHARED) {
-      try { const r = await call('reset'); clearLocal(); gen = r.gen; store.set(KEYS.gen, gen); applyRemote(r); }
+      try { const r = await call('reset', TEAM_KEY); clearLocal(); gen = r.gen; store.set(KEYS.gen, gen); applyRemote(r); }
       catch (e) { toast('No se ha podido borrar: ' + ((e && e.message) || 'error')); return render(); }
     } else clearLocal();
     rebuild(); toast('Todo borrado'); render(true);
@@ -1542,6 +1569,18 @@ const H = {
   endMatch: () => {
     const m = cur(); if (!m) return; const ev = { id: newId(), t: 'end' }; if (me) ev.by = me;
     ui.sheet = null; ui.sel = null; commit({ t: 'ev_add', mid: m.id, eid: ev.id, ev }); vibrate([30, 60, 30]); toast('Partido terminado'); render();
+  },
+  guestLink: async (v) => {
+    const m = matchById(v); if (!m || !SHARED) return;
+    ui.sheet = { kind: 'guest', mid: m.id }; render();
+    sync.boards[m.id] = scoreBoard(m); flush();
+    try { const url = await call('enlaceInvitado', TEAM_KEY, m.id); if (ui.sheet && ui.sheet.kind === 'guest') { ui.sheet.url = url; render(); } }
+    catch (e) { if (ui.sheet && ui.sheet.kind === 'guest') { ui.sheet.err = 'No se ha podido crear el enlace: ' + ((e && e.message) || 'error'); render(); } }
+  },
+  copyGuest: async () => {
+    const url = ui.sheet && ui.sheet.url; if (!url) return;
+    try { await navigator.clipboard.writeText(url); toast('Enlace copiado'); }
+    catch (e) { const el = document.getElementById('guesturl'); if (el) { el.focus(); el.select(); } toast('Mantén pulsado el enlace para copiarlo'); }
   },
   editName: () => { ui.sheet = { kind: 'whoami' }; render(); },
   retry: () => { setSync('connecting'); render(); flush(); },
