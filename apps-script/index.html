@@ -653,6 +653,7 @@ const matchById = (id) => DB.matches.find((m) => m.id === id);
 const cur = () => (route.id && matchById(route.id)) || liveMatch();
 const roster = () => DB.players.filter((p) => p.active !== false);
 const planned = () => DB.matches.filter((m) => m.status === 'planned').sort((a, b) => (a.date + (a.time || '')).localeCompare(b.date + (b.time || '')));
+const waUrl = (text) => 'https:' + '/' + '/wa.me/?text=' + encodeURIComponent(text); // In pieces, like mapsUrl.
 const mapsUrl = (place) => 'https:' + '/' + '/www.google.com/maps/search/?api=1&query=' + encodeURIComponent(place); // Written in pieces: Apps Script strips anything after two slashes.
 const planReady = (m) => { const ids = new Set(roster().map((p) => p.id)); const l = m.plan && m.plan.lineup; return !!(l && l.length === 6 && l.every((id) => id && ids.has(id))); };
 const today = () => new Date().toISOString().slice(0, 10);
@@ -1291,7 +1292,7 @@ function sheetHtml() {
     inner = `<h3>Marcador para el público</h3>
       <p class="muted">Quien abra este enlace verá <b>solo el marcador</b> de este partido (vs. ${esc(gm ? gm.opponent : '')}), en directo. Ni estadísticas, ni nombres, ni puede tocar nada.</p>
       ${s.url ? `<div class="field"><label for="guesturl">Enlace</label><input id="guesturl" class="input" readonly value="${esc(s.url)}" style="font-size:14px"></div>
-      <div class="grid2"><button class="btn primary" style="font-size:16px" data-a="copyGuest">Copiar enlace</button><a class="btn secondary" style="text-decoration:none" href="https://wa.me/?text=${encodeURIComponent(`Marcador en directo de ${DB.team} vs. ${gm ? gm.opponent : ''}: ${s.url}`)}" target="_blank" rel="noopener">WhatsApp</a></div>`
+      <div class="grid2"><button class="btn primary" style="font-size:16px" data-a="copyGuest">Copiar enlace</button><a class="btn secondary" style="text-decoration:none" href="${waUrl(`Marcador en directo de ${DB.team} vs. ${gm ? gm.opponent : ''}: ${s.url}`)}" target="_blank" rel="noopener">WhatsApp</a></div>`
       : s.err ? `<p class="err">${esc(s.err)}</p>` : '<p class="muted">Preparando el enlace…</p>'}`;
   } else if (s.kind === 'how') {
     inner = `<h3>+1 ${s.side === 'us' ? 'Nosotras' : esc(m.opponent)} · ¿cómo?</h3>${pointGrid(s.side, 'quickCause')}`;
